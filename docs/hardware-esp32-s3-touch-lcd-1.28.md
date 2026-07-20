@@ -1,9 +1,11 @@
-# Port target: Waveshare ESP32-S3-Touch-LCD-1.28
+# Hardware: Waveshare ESP32-S3-Touch-LCD-1.28
 
-Candidate **final hardware** (replacing the breadboard / bare devkit). This note captures the
-pinout and the concrete firmware deltas to switch to it.
+The board units ship on (the breadboard and bare devkit were the bring-up rigs). This note captures
+the pinout and the firmware deltas for it.
 
-**APPLIED 2026-07-10** — board arrived and brought up. Env `esp32-s3-touch-128` (PlatformIO forbids
+![Waveshare ESP32-S3-Touch-LCD-1.28 — what's on board](waveshare-1.28-board-map.jpg)
+
+**Brought up 2026-07-10** — Env `esp32-s3-touch-128` (PlatformIO forbids
 `.` in env names), pins gated behind `-D BOARD_WAVESHARE_128`. Display confirmed working at **80 MHz
 SPI**; **`TFT_RST` = 14 confirmed** (12 not needed). Config protocol confirmed over CH343/UART0.
 USB port enumerates as `/dev/cu.usbmodem*` (VID:PID `1A86:55D3`, "USB Single Serial"), *not*
@@ -243,8 +245,9 @@ loss largely disappears, so treat these as the battery-side load. Firmware deep-
 A W×H cell fits an inner circle of diameter D when **√(W²+H²) ≤ D**. Waveshare LCD-module datasheet
 (`docs/ESP32-S3-Touch-LCD-1.28-details-size-1.jpg`): outer glass **Φ38.51 mm**, black edge Φ35.67 mm,
 VA (visible) **Φ33.40 mm**, height 38.51 mm round / **40.36 mm incl. the FPC tail** (~1.85 mm past
-the circle at the bottom). That's the display module, not the PCB outline — board is ~Φ38.5–40 mm
-class; confirm the PCB edge + MX1.25 header location on arrival. A case wrapping the glass gives
+the circle at the bottom). That's the display module, not the PCB outline — the PCB mechanical
+drawing (`docs/ESP32-S3-Touch-LCD-1.28-details-size-2.jpg`) dimensions the board at **Φ39.49 mm**,
+with the USB-C and MX1.25 header offsets. A case wrapping the glass gives
 ~Φ39–40 mm inside → cell diagonal ≤ ~39 mm, so the **500 mAh 30×25 (diag 39 mm) fits** for the unit
 build. Bezel budget: (Φ38.51−Φ33.40)/2 ≈ **2.55 mm** of non-visible glass to tuck under a case lip
 before clipping pixels. Thickness (typ. 4–8 mm) is a depth-budget call; leave room for the FPC tail.

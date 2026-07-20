@@ -64,15 +64,16 @@ CONTRAST knob shapes their gamma, by design — one knob drives every display on
 
 ## Hardware
 
-Today's firmware builds for an **ESP32-S3-DevKitC-1** driving a bare GC9A01 over hardware SPI —
-that's the bench rig. The **legacy ESP32-C3** target still builds.
+Units ship on the
+**[Waveshare ESP32-S3-Touch-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.28)** — a
+self-contained round board with the GC9A01 display, an onboard LiPo charger and battery header, a
+PWM backlight, capacitive touch, and a 6-axis IMU the tilt-reactive modes read. Env
+`esp32-s3-touch-128`; the pinout, a board map, and the firmware deltas are in
+[`docs/hardware-esp32-s3-touch-lcd-1.28.md`](docs/hardware-esp32-s3-touch-lcd-1.28.md), with a
+printable case in [`docs/`](docs/) and a parametric fob enclosure under [`hardware/`](hardware/).
 
-The board these are actually meant to ship on is the
-[Waveshare ESP32-S3-Touch-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.28): same
-display, onboard charger and battery header, a real PWM backlight, and a 6-axis IMU that should make
-the manual flip toggle obsolete. **That port isn't done** — the pinout and the deltas are written up
-in [`docs/hardware-esp32-s3-touch-lcd-1.28.md`](docs/hardware-esp32-s3-touch-lcd-1.28.md), and
-there's a case for it in [`docs/`](docs/).
+The firmware also builds for a bare **ESP32-S3-DevKitC-1** over hardware SPI (the bench rig) and for
+the **legacy ESP32-C3**.
 
 Pins live in one block at the top of `main.cpp`.
 
@@ -81,8 +82,9 @@ Pins live in one block at the top of `main.cpp`.
 PlatformIO, from its venv:
 
 ```sh
-~/.platformio/penv/bin/pio run -e esp32-s3               # build (primary target)
-~/.platformio/penv/bin/pio run -e esp32-c3-devkitm-1     # build (legacy target)
+~/.platformio/penv/bin/pio run -e esp32-s3-touch-128     # build (Waveshare — the ship board)
+~/.platformio/penv/bin/pio run -e esp32-s3               # build (bare S3 devkit — bench rig)
+~/.platformio/penv/bin/pio run -e esp32-c3-devkitm-1     # build (legacy C3)
 ~/.platformio/penv/bin/pio test -e native                # host unit tests
 ```
 
