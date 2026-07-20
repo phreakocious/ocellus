@@ -1,46 +1,157 @@
-# ESP32-third-eye
-Flashy Third Eye Keychain - ESP32C3 with a TFT 240x240 round display :) 
+# ocellus
 
-Stay tuned for a full explanation video breakdown!
+> **ocellus** *(n., pl.* **ocelli***)* — a simple eye. The kind arthropods have: round,
+> unlidded, watching.
 
-https://github.com/user-attachments/assets/96602202-458b-44b2-9f93-7006af71f293
+An eye on a 240×240 round LCD. It looks around, blinks, dilates, gets bored, rolls its eyes at
+you, and — if there's a [Sensory Bridge](https://github.com/connornishijima/SensoryBridge) on the
+network — reacts to whatever's playing. Each one is configured for the person it belongs to over
+USB, no reflash.
 
-https://www.youtube.com/shorts/7sj0YZZGYZA
+<!-- TODO: hero video/GIF of an actual ocellus goes here. -->
 
-Case for the ESP32 Digital Keychain! by Jekyllz | Download STL model | Printables.com https://share.google/iLub79oQowGHvac2F
+---
 
+## Using it
 
-Reach out for any questions! > https://www.reddit.com/user/Jekyllz/
+**One button.**
 
-This was programmed using Platform IO but you can create easily in Arduino IDE using the board device settings below and copy pasta main.cpp into it!
+| gesture | what happens |
+|---|---|
+| single click | next mode, skipping anything you didn't favorite |
+| double click | the eye flinches (eye modes only) |
+| triple click | jump into the effects |
+| long press | power down — click again to wake |
 
-board = esp32-c3-devkitm-1
+It also sleeps on its own after a few idle minutes. Set `sleepMin` to `0` if you'd rather it never
+did.
 
-Arduino IDE GOTO > tools > enable the below
+## Personalizing it
 
-Board = 'ESP32C3 Dev Module'
-CDC_ON_BOOT=ON
+Open **<https://nullphase.net/oc/>** in Chrome or Edge, plug the ocellus in over USB, hit
+**Connect**, and pick its port. Everything below is stored on the device and survives a power cut:
 
+- **Your name** — woven into the Matrix rain, spiralled out of the center, or revealed letter by
+  letter at boot (matrix / slide / bounce).
+- **Brightness** (0–255), **sleep timeout**, **frame cap**, **180° flip** for an upside-down case.
+- **Colors** — skin tone, iris tint, and the Void mode's background, each as a hex color.
+- **Eyelids** on or off.
+- **Favorites** — a checkbox per mode. Single-click only cycles the ones you ticked.
+- **Palettes** — enable any of ten presets, add up to four of your own, and set how often they
+  rotate. Switches crossfade rather than snap.
+- **Startup** — resume where you left off, always start on one mode, or pick at random.
 
-<img width="496" height="463" alt="image" src="https://github.com/user-attachments/assets/53568b98-19f6-465e-b356-7bc991c46e36" />
+Firefox and Safari don't implement Web Serial, and the page needs `https` or `localhost` — opening
+the file directly from disk won't work.
 
-You can buy a DIY kit from me (I'm non-profit hobbyist) directly also there's a custom PCB required to manufactor and purchase (works out much cheaper to buy kit or I have ready built pieces to send out!)
-[https://www.tindie.com/products/jekyllz/2x-tft-adaptor-for-the-esp32c3-super-mini/](https://www.tindie.com/products/jekyllz/esp-flashy-keychain/)
+## The modes
 
-STL FILES > https://www.printables.com/model/1755628-case-for-the-esp32-digital-keychain
+**Eyes (13)** — Radiate, Glitch, Orbit, Breathe, Grid, Static, Rings, Void, Box, Magenta, Confetti,
+Aztec, Mosaic.
 
-*Parts required* - 
+Every eye theme has moods. It gets curious, skeptical, calm, or drowsy depending on which theme
+you're on and how long you've been watching, and the mood drives gaze, lid position, pupil size, and
+how often it decides to look away from you.
 
-LP402535 - https://www.amazon.co.uk/EEMB-402535-Rechargeable-Connector-Certified/dp/B08215N9R8/ref=asc_df_B08215N9R8?mcid=93324f3ae53c35e4b1d6446cac8d802a&tag=googshopuk-21&linkCode=df0&hvadid=697249433713&hvpos=&hvnetw=g&hvrand=7397641060738400917&hvpone=&hvptwo=&hvqmt=&hvdev=c&hvdvcmdl=&hvlocint=&hvlocphy=1006602&hvtargid=pla-990836091110&hvocijid=7397641060738400917-B08215N9R8-&hvexpln=0&gad_source=1&th=1
+**Effects (17)** — Matrix, Cube, Plasma, Tesseract, Tunnel, Weave, Sonar, Squares, Bars, Ripple,
+Spokes, Name Spiral, Starfield, Mystify, DVD, Pipes, Fractal.
 
-TFT 240x240Round Display - https://www.amazon.co.uk/Hailege-GC9A01-240x240-Display-Interface/dp/B0CJY4Q6YB/ref=asc_df_B0CJY4Q6YB?mcid=3f0551fc68ca3f5fa1d5fdbeaaf7623c&tag=googshopuk-21&linkCode=df0&hvadid=710804269330&hvpos=&hvnetw=g&hvrand=14476485754611708211&hvpone=&hvptwo=&hvqmt=&hvdev=c&hvdvcmdl=&hvlocint=&hvlocphy=1006602&hvtargid=pla-2395466901284&hvocijid=14476485754611708211-B0CJY4Q6YB-&hvexpln=0&gad_source=1&th=1
+**Audio (3)** — Bloom, Radial Spectrum, Reactive Iris.
 
-ESP32C3 - https://www.amazon.co.uk/diymore-ESP32-C3-Development-Bluetooth-Projects/dp/B0DS23ML1L/ref=sr_1_1_sspa?crid=2J7BS4FZFD3OH&dib=eyJ2IjoiMSJ9.GS1PEpN3i-F14NRmUzuHt-MhUuEZV1F9YbwcegzTzhmL5Y4PhH0pyBdJwcoz5Xft7CyhECYZbzA-gnCo1LcGxkotZ0vrrnCPYGsO72xhkCSGiDjppvUg77KYeQMbo_WeKuwb82wbZxsT29-eGFLK6ui86IsarypZMBzz6kki4ltgAXxpQJsGe7N7L1doB_jZ5_8SwHQimdZLqMvqqRcY6cGhCtc3_DI5AQnx2H70zlFfj8hCODS-r51CK1IrDSj7-Gh0yomsmUfRk9pvv60HNZtyRSkdyuOTq3xdBFsPOvI.pciQQ1kuAB8peFQy6b4aPb6IhQ-NbIV_4fzHZMRxL6E&dib_tag=se&keywords=esp32c3+super+mini&qid=1781600344&s=industrial&sprefix=esp32c3+super+mini%2Cindustrial%2C91&sr=1-1-spons&aref=3J65CQFny4&sp_csd=d2lkZ2V0TmFtZT1zcF9hdGY&psc=1
+The audio modes are **not standalone**. They listen for a Sensory Bridge broadcasting its 64-bin
+spectrum over ESP-NOW; without one on the network they'll sit there showing nothing. The console's
+CONTRAST knob shapes their gamma, by design — one knob drives every display on the network.
 
-slide switches - https://www.amazon.co.uk/dp/B09TVFF6KW?ref=ppx_yo2ov_dt_b_fed_asin_title
+## Hardware
 
-PCB Adapter - grab a copy here! https://www.tindie.com/products/jekyllz/2x-tft-adaptor-for-the-esp32c3-super-mini/
-    This is custom built! [third-eye-Gerber_PCB2_2026-06-16.zip](https://github.com/user-attachments/files/28994404/third-eye-Gerber_PCB2_2026-06-16.zip)
+Today's firmware builds for an **ESP32-S3-DevKitC-1** driving a bare GC9A01 over hardware SPI —
+that's the bench rig. The **legacy ESP32-C3** target still builds.
 
-tact button - https://www.amazon.co.uk/dp/B008DS1DPM?ref=ppx_yo2ov_dt_b_fed_asin_title
+The board these are actually meant to ship on is the
+[Waveshare ESP32-S3-Touch-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.28): same
+display, onboard charger and battery header, a real PWM backlight, and a 6-axis IMU that should make
+the manual flip toggle obsolete. **That port isn't done** — the pinout and the deltas are written up
+in [`docs/hardware-esp32-s3-touch-lcd-1.28.md`](docs/hardware-esp32-s3-touch-lcd-1.28.md), and
+there's a case for it in [`docs/`](docs/).
 
+Pins live in one block at the top of `main.cpp`.
+
+## Building it
+
+PlatformIO, from its venv:
+
+```sh
+~/.platformio/penv/bin/pio run -e esp32-s3               # build (primary target)
+~/.platformio/penv/bin/pio run -e esp32-c3-devkitm-1     # build (legacy target)
+~/.platformio/penv/bin/pio test -e native                # host unit tests
+```
+
+To flash, don't guess the port. `tools/flash.py` probes every `/dev/cu.usbmodem*` with the config
+protocol and only flashes the one that answers like an ocellus:
+
+```sh
+~/.platformio/penv/bin/python tools/flash.py s3 --anim 24
+```
+
+`--anim` re-selects a mode after the reboot, which is most of what you want while iterating on one.
+
+A connected config page holds the serial port open, and both the probe and the upload will fail with
+`Resource busy` until you close that tab.
+
+## Contributing
+
+Sources live at the repo root — `src_dir = .` — not in `src/`.
+
+| file | what it is |
+|---|---|
+| `main.cpp` | rendering, dispatch, button, sleep. The big one. |
+| `animations.h` | the registry: id ↔ name ↔ group. Ids are the stable key; names are free to change. |
+| `config.*` | `Config` struct + JSON codec |
+| `protocol.*` | the `catalog` / `get` / `set` line handler |
+| `palette.*` | palette engine and crossfade |
+| `audio.*` | Sensory Bridge wire decode |
+| `config_store.*` | NVS persistence (namespace `ocellus`) |
+| `config.html` | the Web Serial config page, self-contained |
+
+`config.*`, `protocol.*`, `palette.*`, and `audio.*` are deliberately Arduino-free, so the `native`
+env compiles and tests them on a host. Keep them that way — it's why there are tests at all.
+
+**Adding an effect:** append to `ANIMS[]`, bump `EFFECT_COUNT`, and add a `case` to `renderEffect()`
+(its switch is 0-based within the effect group, so the 18th effect is `case 17`). The config page
+reads the registry over serial, so it picks up the new mode with no edits.
+
+Mind the catch: `loop()` dispatches by *id range*, not by the registry's `group` field, and the audio
+modes start at `EYE_COUNT + EFFECT_COUNT`. Growing the effect group therefore renumbers the audio
+modes, and a saved `favoritesMask` or `startupId` on an existing device will point at the wrong
+thing. Ids are only stable within a group. Unifying that dispatch is on the list.
+
+**Things that will bite you:**
+
+- Call `Serial.setRxBufferSize(2048)` *before* `Serial.begin()`. The default 256-byte RX ring
+  silently truncates a full config payload, and the symptom is "the name won't save."
+- SPI runs at 40 MHz. That's wiring-dependent — 80 MHz blanked the panel over breadboard jumpers.
+  Drop toward 20 MHz if a new build glitches.
+- The button is polled in its own FreeRTOS task. A full-framebuffer flush takes long enough to starve
+  inline polling.
+- The C3 has no FPU, so `float` is software-emulated. Keep trig out of hot loops while that target
+  still builds.
+
+## Provenance
+
+Forked from **[Jekyllz/ESP32-third-eye](https://github.com/Jekyllz/ESP32-third-eye)** by Jake, whose
+original ~370-line sketch is the seed this grew from. He sells
+[kits and a PCB adaptor](https://www.tindie.com/products/jekyllz/esp-flashy-keychain/) for the C3
+keychain build, publishes [the case as an STL](https://www.printables.com/model/1755628-case-for-the-esp32-digital-keychain),
+and is [reachable on Reddit](https://www.reddit.com/user/Jekyllz/). If you want the original
+keychain rather than this, go build his — it's a lovely little thing.
+
+This fork went its own way: moods, gaze, palettes, audio reactivity, per-unit configuration, a host
+test suite, and an S3 port. None of it is upstreamed.
+
+## License
+
+[MIT](LICENSE).
+
+Upstream carried no license — all rights reserved by default — but Jake gave his blessing to
+release this fork under an open license, so it ships MIT. Credit for the original seed is his;
+see Provenance above.

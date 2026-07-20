@@ -1,0 +1,8 @@
+.pio/
+CLAUDE.md
+TODO.md
+NEXT_SESSION.md
+*.swp
+.DS_Store
+__pycache__/
+references/

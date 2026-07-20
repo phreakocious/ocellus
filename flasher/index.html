@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash ocellus</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #0d0f12; color: #e6e6e6;
+    font: 16px/1.6 system-ui, -apple-system, Segoe UI, sans-serif;
+  }
+  main { max-width: 34rem; padding: 2rem 1.5rem; text-align: center; }
+  h1 { font-weight: 600; letter-spacing: .02em; }
+  ol { text-align: left; color: #b7bdc6; }
+  li { margin: .4rem 0; }
+  a { color: #6fb3ff; }
+  code { background: #191c22; padding: .1rem .35rem; border-radius: 4px; }
+  esp-web-install-button { display: inline-block; margin: 1.5rem 0; }
+  .hint { color: #8a919b; font-size: .9rem; margin-top: 2rem; }
+  .unsupported, .not-allowed { color: #ff8a8a; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ocellus firmware installer</h1>
+  <p>Flashes the eye directly from this page — no software to install.</p>
+
+  <ol>
+    <li>One-time: install the <a href="https://www.wch-ic.com/downloads/CH343SER_EXE.html">CH343 USB driver</a>, then reboot if it asks.</li>
+    <li>Plug the board into USB. Use <b>Chrome</b> or <b>Edge</b> (easiest — Safari won't work).</li>
+    <li>Click <b>Install</b> below, pick the board's COM port, and let it run.</li>
+  </ol>
+
+  <esp-web-install-button manifest="./manifest.json">
+    <span slot="unsupported" class="unsupported">Open this page in Chrome or Edge on a computer.</span>
+    <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS.</span>
+  </esp-web-install-button>
+
+  <p class="hint">If no port appears, the driver isn't installed yet (step 1).<br>
+  If it appears but won't connect, hold <code>BOOT</code>, tap <code>RESET</code>, release <code>BOOT</code>, then Install again.</p>
+</main>
+</body>
+</html>
