@@ -26,15 +26,17 @@ constexpr int EFFECT_COUNT = 25;   // effect ids 13..37 (33 = Wormhole, 34 = QR,
 constexpr int AUDIO_BASE   = 38;   // audio ids pinned here; NO reserved ids left below -- next effect goes to 45+ (see header comment)
 constexpr int AUDIO_COUNT  = OCELLUS_AUDIO ? 4 : 0;   // audio ids 38..41 (41 = Echo); 0 = niche compiled out
 constexpr uint8_t SWIRL_ID = 45;   // first effect past the debug block (13..37 is full); the 4-click cycle hops 37 -> 45 -> 13
-constexpr int ANIM_COUNT   = SWIRL_ID + 1;
-   // 46 in BOTH flavors: one PAST the highest playable id (Swirl). An ID BOUND for loops/moduli,
-   // NOT a count -- 42..44 (debug) and, audio-off, 38..41 are holes below it. Membership tests
-   // use isPlayableId(), never `< ANIM_COUNT` alone.
+constexpr uint8_t ATLAS_BASE = SWIRL_ID + 1;   // id 46: first ported creative-coding lab effect (atlas.html catalog)
+constexpr int ATLAS_COUNT  = 7;                // ids 46..52: Julia, Interference, Munching Squares, Wireframe Globe, Rose Window, Polar Rose, Fermat Spiral
+constexpr int ANIM_COUNT   = ATLAS_BASE + ATLAS_COUNT;   // one PAST the highest playable id (54 = Rule 30)
+   // An ID BOUND for loops/moduli, NOT a count -- 42..44 (debug) and, audio-off, 38..41 are holes
+   // below it. Membership tests use isPlayableId(), never `< ANIM_COUNT` alone.
 constexpr uint64_t PLAYABLE_MASK = ((1ull << (EYE_COUNT + EFFECT_COUNT)) - 1)
                                  | (AUDIO_COUNT ? ((1ull << AUDIO_COUNT) - 1) << AUDIO_BASE : 0)
-                                 | (1ull << SWIRL_ID);
+                                 | (1ull << SWIRL_ID)
+                                 | (((1ull << ATLAS_COUNT) - 1) << ATLAS_BASE);   // ids 46..54
 inline bool isPlayableId(int id) { return id >= 0 && id < 64 && ((PLAYABLE_MASK >> id) & 1); }
-constexpr int PLAYABLE_ENTRY_COUNT = EYE_COUNT + EFFECT_COUNT + AUDIO_COUNT + 1;  // ANIMS[] prefix = playables, in id order (+1 = Swirl)
+constexpr int PLAYABLE_ENTRY_COUNT = EYE_COUNT + EFFECT_COUNT + AUDIO_COUNT + 1 + ATLAS_COUNT;  // ANIMS[] prefix = playables, in id order (+1 = Swirl, +ATLAS_COUNT ported effects)
 constexpr int DEBUG_COUNT  = OCELLUS_AUDIO ? 3 : 1;   // dev-only screens; audio off = sensor debug only
 constexpr uint8_t DEBUG_ID = 42;                          // sensor debug -- pinned in every flavor, reached via anim cmd / flash.py --anim (not in the button cycle)
 #if OCELLUS_AUDIO
@@ -86,6 +88,14 @@ static const AnimInfo ANIMS[REGISTRY_COUNT] = {
   {41, "Echo",            "audio"},
 #endif
   {SWIRL_ID, "Swirl", "effect"},         // id 45 -- lives past the debug ids; playable prefix stays in id order
+  // ids 46..49 -- creative-coding lab effects ported from effects.js (atlas.html catalog)
+  {(uint8_t)(ATLAS_BASE+0), "Julia",           "effect"},
+  {(uint8_t)(ATLAS_BASE+1), "Interference",    "effect"},
+  {(uint8_t)(ATLAS_BASE+2), "Munching Sq",     "effect"},
+  {(uint8_t)(ATLAS_BASE+3), "Wireframe Globe", "effect"},
+  {(uint8_t)(ATLAS_BASE+4), "Rose Window",     "effect"},
+  {(uint8_t)(ATLAS_BASE+5), "Polar Rose",      "effect"},
+  {(uint8_t)(ATLAS_BASE+6), "Fermat Spiral",   "effect"},
   {DEBUG_ID, "Sensor Debug", "debug"},   // the constant, not a literal
 #if OCELLUS_AUDIO
   {AUDIO_DEBUG_ID, "Audio Debug", "debug"},
