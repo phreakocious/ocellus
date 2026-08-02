@@ -4,9 +4,8 @@
 > unlidded, watching.
 
 An eye on a 240×240 round LCD. It looks around, blinks, dilates, gets bored, rolls its eyes at
-you, and — if there's a [Sensory Bridge](https://github.com/connornishijima/SensoryBridge) on the
-network — reacts to whatever's playing. Each one is configured for the person it belongs to over
-USB, no reflash.
+you, and — if you happen to be near the **Wall of Sheep** — reacts to whatever's playing.
+Configured over USB, no reflash.
 
 <!-- TODO: hero video/GIF of an actual ocellus goes here. -->
 
@@ -14,53 +13,75 @@ USB, no reflash.
 
 ## Using it
 
-**One button.**
+**One button:**
 
 | gesture | what happens |
 |---|---|
-| single click | next mode, skipping anything you didn't favorite |
-| double click | the eye flinches (eye modes only) |
-| triple click | jump into the effects |
+| single click | next mode (only the ones you favorited) |
+| double click | the eye flinches (eye modes) |
+| triple click | cycle the dev/debug screens |
+| quadruple click | jump into / step through the effects |
 | long press | power down — click again to wake |
 
-It also sleeps on its own after a few idle minutes. Set `sleepMin` to `0` if you'd rather it never
-did.
+**Touch** (on the round glass):
 
-## Personalizing it
+| gesture | what happens |
+|---|---|
+| swipe left / right | previous / next favorite |
+| swipe up | open the **carousel** — a scrollable strip to scrub straight to any mode |
+| tap | wake, jitter the eye, or feed the cat (treatcat mode) |
 
-Open **<https://nullphase.net/oc/>** in Chrome or Edge, plug the ocellus in over USB, hit
-**Connect**, and pick its port. Everything below is stored on the device and survives a power cut:
+It sleeps on its own after a few idle minutes. Set `sleepMin` to `0` if you'd rather it never did.
 
-- **Your name** — woven into the Matrix rain, spiralled out of the center, or revealed letter by
-  letter at boot (matrix / slide / bounce).
+## Configuring it
+
+Each unit is configured over USB — no reflash, and everything survives a power cut. Open
+**<https://nullphase.net/oc/>** in Chrome or Edge, plug the ocellus in, hit **Connect**, and pick
+its port:
+
+- **A name** — woven into the Matrix rain, spiralled out of the center, or revealed letter by
+  letter at boot.
 - **Brightness** (0–255), **sleep timeout**, **frame cap**, **180° flip** for an upside-down case.
-- **Colors** — skin tone, iris tint, and the Void mode's background, each as a hex color.
+- **Colors** — skin tone, iris tint, and mode backgrounds, each as a hex color.
 - **Eyelids** on or off.
-- **Favorites** — a checkbox per mode. Single-click only cycles the ones you ticked.
+- **Favorites** — a checkbox per mode. Single-click and swipes cycle only the ones you ticked.
 - **Palettes** — enable any of ten presets, add up to four of your own, and set how often they
   rotate. Switches crossfade rather than snap.
+- **Your own content** — upload images for the slideshow, a QR code, or animated GIFs; they live on
+  the device.
 - **Startup** — resume where you left off, always start on one mode, or pick at random.
 
 Firefox and Safari don't implement Web Serial, and the page needs `https` or `localhost` — opening
 the file directly from disk won't work.
+
+**No toolchain?** The one-click web flasher at **<https://nullphase.net/oc/flash/>** installs the
+firmware straight from the browser: Connect, Install, done.
 
 ## The modes
 
 **Eyes (13)** — Radiate, Glitch, Orbit, Breathe, Grid, Static, Rings, Void, Box, Magenta, Confetti,
 Aztec, Mosaic.
 
-Every eye theme has moods. It gets curious, skeptical, calm, or drowsy depending on which theme
-you're on and how long you've been watching, and the mood drives gaze, lid position, pupil size, and
-how often it decides to look away from you.
+Every eye theme has moods. It gets curious, skeptical, calm, or drowsy depending on the theme and
+how long you've been watching, and the mood drives gaze, lid position, pupil size, and how often it
+decides to look away from you.
 
-**Effects (17)** — Matrix, Cube, Plasma, Tesseract, Tunnel, Weave, Sonar, Squares, Bars, Ripple,
-Spokes, Name Spiral, Starfield, Mystify, DVD, Pipes, Fractal.
+**Effects** — Matrix, Cube, Plasma, Tesseract, Tunnel, Weave, Sonar, Squares, Bars, Ripple, Spokes,
+Name Spiral, Starfield, Mystify, DVD, Pipes, Fractal, Swirl — plus a physics-and-creative set: Fluid
+(tilt-driven), Yin-Yang, Wormhole, Toasters, Boids, Garden Eels, and seven ports from a
+creative-coding lab: Julia, Interference, Munching Squares, Wireframe Globe, Rose Window, Polar
+Rose, Fermat Spiral.
 
-**Audio (3)** — Bloom, Radial Spectrum, Reactive Iris.
+**Interactive** — Slideshow (your images), QR (your code), GIFs (your clips), and **treatcat**, a
+little cat you tap to feed.
 
-The audio modes are **not standalone**. They listen for a Sensory Bridge broadcasting its 64-bin
-spectrum over ESP-NOW; without one on the network they'll sit there showing nothing. The console's
-CONTRAST knob shapes their gamma, by design — one knob drives every display on the network.
+**Audio (4)** — Bloom, Radial Spectrum, Reactive Iris, Echo.
+
+The audio modes are **not standalone**. They listen for a
+[Sensory Bridge](https://github.com/connornishijima/SensoryBridge) broadcasting its 64-bin spectrum
+over ESP-NOW. A stock Sensory Bridge doesn't broadcast that — it's our units that do, so in practice
+this lights up if you're near the **Wall of Sheep**. With nothing on the air, the audio modes just
+sit there showing nothing.
 
 ## Hardware
 
@@ -68,14 +89,10 @@ Units ship on the
 **[Waveshare ESP32-S3-Touch-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.28)** — a
 self-contained round board with the GC9A01 display, an onboard LiPo charger and battery header, a
 PWM backlight, capacitive touch, and a 6-axis IMU the tilt-reactive modes read. Env
-`esp32-s3-touch-128`; the pinout, a board map, and the firmware deltas are in
-[`docs/hardware-esp32-s3-touch-lcd-1.28.md`](docs/hardware-esp32-s3-touch-lcd-1.28.md), with a
-printable case in [`docs/`](docs/) and a parametric fob enclosure under [`hardware/`](hardware/).
+`esp32-s3-touch-128`. A parametric fob enclosure lives under [`hardware/`](hardware/).
 
-The firmware also builds for a bare **ESP32-S3-DevKitC-1** over hardware SPI (the bench rig) and for
-the **legacy ESP32-C3**.
-
-Pins live in one block at the top of `main.cpp`.
+The firmware also builds for a bare **ESP32-S3-DevKitC-1** (the bench rig), the **ESP32-S3-Zero**,
+and the **legacy ESP32-C3**. Pins live in one block at the top of `main.cpp`.
 
 ## Building it
 
@@ -92,7 +109,7 @@ To flash, don't guess the port. `tools/flash.py` probes every `/dev/cu.usbmodem*
 protocol and only flashes the one that answers like an ocellus:
 
 ```sh
-~/.platformio/penv/bin/python tools/flash.py s3 --anim 24
+~/.platformio/penv/bin/python tools/flash.py s3-touch --anim 24
 ```
 
 `--anim` re-selects a mode after the reboot, which is most of what you want while iterating on one.
@@ -118,21 +135,20 @@ Sources live at the repo root — `src_dir = .` — not in `src/`.
 `config.*`, `protocol.*`, `palette.*`, and `audio.*` are deliberately Arduino-free, so the `native`
 env compiles and tests them on a host. Keep them that way — it's why there are tests at all.
 
-**Adding an effect:** append to `ANIMS[]`, bump `EFFECT_COUNT`, and add a `case` to `renderEffect()`
-(its switch is 0-based within the effect group, so the 18th effect is `case 17`). The config page
-reads the registry over serial, so it picks up the new mode with no edits.
-
-Mind the catch: `loop()` dispatches by *id range*, not by the registry's `group` field, and the audio
-modes start at `EYE_COUNT + EFFECT_COUNT`. Growing the effect group therefore renumbers the audio
-modes, and a saved `favoritesMask` or `startupId` on an existing device will point at the wrong
-thing. Ids are only stable within a group. Unifying that dispatch is on the list.
+**Adding an effect:** append an entry to `ANIMS[]` in `animations.h` with a fresh id above the
+current top, and wire a branch into `loop()`'s dispatch. The eye/effect ids run 0–37, then effects
+continue *above* the pinned audio (38–41) and debug (42–44) blocks at 45+. Those pinned ids must
+never move — units in the field have them in saved configs — so the id space has holes, and
+membership is tested with `isPlayableId()` / `animIdKnown()`, never `id < ANIM_COUNT`. The config
+page reads the registry over serial, so it picks up the new mode with no edits.
 
 **Things that will bite you:**
 
 - Call `Serial.setRxBufferSize(2048)` *before* `Serial.begin()`. The default 256-byte RX ring
   silently truncates a full config payload, and the symptom is "the name won't save."
-- SPI runs at 40 MHz. That's wiring-dependent — 80 MHz blanked the panel over breadboard jumpers.
-  Drop toward 20 MHz if a new build glitches.
+- SPI runs at **80 MHz** on the Waveshare and the S3-Zero, 40 MHz on the bench devkit and C3. It's
+  wiring-dependent — 80 MHz blanked the panel over breadboard jumpers on one early rig. Drop toward
+  20 MHz if a new build glitches.
 - The button is polled in its own FreeRTOS task. A full-framebuffer flush takes long enough to starve
   inline polling.
 - The C3 has no FPU, so `float` is software-emulated. Keep trig out of hot loops while that target
