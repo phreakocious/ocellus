@@ -86,6 +86,15 @@ EXPECT = {
             # the lug's web. Offset in X on purpose: a probe at (0, lug_reach)
             # lands inside the very hole it is meant to be testing.
             ("lug web", (3.5, LUG_REACH, TOTAL_H / 2)),
+            # retention: the +-X rim-support pads (anti-rock) reach up to the PCB
+            # rest plane. Original cavity is VOID here (floor drops to ~9.5); the
+            # pad makes it solid to ~10.7. Probe above the floor, below the top.
+            ("rim support pad +X", (18.0, 0.0, 10.3)),
+            ("rim support pad -X", (-18.0, 0.0, 10.3)),
+            # the crush ribs (anti-spin): tip at wall_in - rib_inter = 19.05, two per
+            # side at y=+-3. A point just inboard of the wall, on the rib row, is rib.
+            ("crush rib +X", (19.15, 3.0, 15.0)),
+            ("crush rib -X mirror", (-19.15, -3.0, 15.0)),
         ],
         "void": [
             ("board pocket", (0.0, 0.0, 14.0)),
@@ -130,6 +139,13 @@ EXPECT = {
             # native void, which is exactly what the nub operates in
             ("recess above pad at nub", (SW_X, SW_Y, FLOOR + 0.1)),
             ("lug hole", (0.0, LUG_REACH, TOTAL_H / 2)),
+            # the board must still seat: nothing above the rim pad's top plane
+            ("above rim pad -- board seats here", (18.0, 0.0, 11.5)),
+            # y=0 between the two ribs stays open, and the ribs never reach absurdly
+            # far inboard (x=18.4 = 0.9mm interference -- void for any sane rib_inter,
+            # so tuning rib_inter in the 0.25-0.6 range doesn't churn this probe)
+            ("cavity clear between ribs", (19.15, 0.0, 15.0)),
+            ("rib does not overreach", (18.4, 3.0, 15.0)),
         ],
     },
     "coupon": {
@@ -141,6 +157,9 @@ EXPECT = {
         "solid": [
             ("coupon wall", (20.4, 0.0, 12.0)),
             ("coupon seat pad", (0.0, -19.6, POCKET_Z + 0.6)),
+            # the retention features must survive into the coupon so it can test them
+            ("coupon rim pad", (18.0, 0.0, 10.3)),
+            ("coupon crush rib", (19.15, 3.0, 15.0)),
         ],
         "void": [
             ("coupon pocket", (0.0, 0.0, 14.0)),

@@ -125,7 +125,7 @@ constexpr uint8_t  SNARE_MARGIN_DIV    = 6;
 constexpr uint8_t  SNARE_VS_KICK_NUM   = 1;
 constexpr uint8_t  SNARE_VS_KICK_DEN   = 1;
 
-// --- Audio-mode drawdown ---
+// --- Audio-mode drawdown (see docs/superpowers/specs/2026-07-14-audio-drawdown-demo-design.md) ---
 constexpr uint32_t DRAWDOWN_SILENCE_MS = 3000;    // silence before fps cap + radio duty-cycle
 constexpr uint32_t LISTEN_MS           = 1500;    // radio-on listen window per probe
 constexpr uint32_t BACKOFF_BASE_MS     = 8000;    // first radio-off interval

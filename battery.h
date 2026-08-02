@@ -5,6 +5,7 @@
 // [env:native]) -- main.cpp feeds it readBatteryMv() every ~5s and acts on the state:
 //   LOW    -> drowsy eye mood + backlight cap + battery splash (entry + every 5 min)
 //   CUTOFF -> final splash + powerOff(), protecting the cell from deep discharge
+// Spec: docs/superpowers/specs/2026-07-16-low-battery-ui-design.md
 
 enum BattState : uint8_t { BATT_NORMAL, BATT_LOW, BATT_CUTOFF };
 

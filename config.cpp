@@ -44,6 +44,8 @@ std::string configToJson(const Config& c) {
   d["eyelids"] = c.eyelids;
   d["sbPalette"] = c.sbPalette;
   d["slideshowSec"] = c.slideshowSec;
+  d["gifSec"] = c.gifSec;
+  d["catVariant"] = c.catVariant;
   JsonObject st = d["startup"].to<JsonObject>();
   st["mode"] = c.startupMode;
   st["id"] = c.startupId;
@@ -91,6 +93,8 @@ bool configFromJson(const std::string& json, Config& c) {
   if (d["eyelids"].is<bool>())          c.eyelids = d["eyelids"];
   if (d["sbPalette"].is<bool>())        c.sbPalette = d["sbPalette"];
   if (d["slideshowSec"].is<int>()) { int v = d["slideshowSec"].as<int>(); c.slideshowSec = v < 1 ? 1 : (v > 60 ? 60 : v); }
+  if (d["gifSec"].is<int>()) { int v = d["gifSec"].as<int>(); c.gifSec = v < 1 ? 1 : (v > 60 ? 60 : v); }
+  if (d["catVariant"].is<int>()) { int v = d["catVariant"].as<int>(); c.catVariant = (v < 0 || v > 5) ? 0 : (uint8_t)v; }
   if (d["startup"].is<JsonObject>()) {
     if (d["startup"]["mode"].is<const char*>()) c.startupMode = d["startup"]["mode"].as<std::string>();
     if (d["startup"]["id"].is<int>())           { int v = d["startup"]["id"].as<int>(); c.startupId = isPlayableId(v) ? (uint8_t)v : 0; }

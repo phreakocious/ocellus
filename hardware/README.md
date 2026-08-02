@@ -9,6 +9,7 @@ screen reveal (which sits 0.93 mm toward the lug), so the front bezel is a **uni
 
 For reference: the original case is 41.1 × 43.0 × 11.1 with a ~1.1 mm wall.
 
+Design: `docs/superpowers/specs/2026-07-13-fob-enclosure-design.md`
 
 ## Build
 

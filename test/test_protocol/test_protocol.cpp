@@ -66,7 +66,10 @@ void test_anim_selects_live_animation() {
     deserializeJson(d2, r2);
     TEST_ASSERT_EQUAL_STRING("err", d2["type"]);
     int sel3 = 5;
-    std::string r3 = handleLine("{\"cmd\":\"anim\",\"id\":46}", c, changed, &sel3);  // unknown id -> rejected
+    // ANIM_COUNT, not a literal -- always one past the last playable, so this stays an unknown id
+    // as the registry grows (a hardcoded 47 then 48 both went stale here).
+    std::string r3 = handleLine("{\"cmd\":\"anim\",\"id\":" + std::to_string(ANIM_COUNT) + "}",
+                                c, changed, &sel3);  // unknown id -> rejected
     TEST_ASSERT_EQUAL_INT(-1, sel3);
     JsonDocument d3;
     deserializeJson(d3, r3);

@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>cat_tune</title><style>
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; }
+  body { background:#14161f; color:#cdd3e0; font:13px/1.4 -apple-system,sans-serif;
+         display:flex; gap:24px; padding:16px; height:100vh; overflow:hidden; }
+  #controls { width:328px; flex:none; min-height:0; overflow-y:auto; padding-right:8px; }
+  #stage { flex:1; min-width:0; min-height:0; overflow:auto; }
+  label { display:flex; align-items:center; gap:8px; margin:3px 0; }
+  label span.k { width:96px; color:#8b93a7; }
+  label span.v { width:48px; text-align:right; font-family:monospace; }
+  label.override span.k { color:#f2b35d; }
+  label.override span.k::after { content:" •"; }
+  label.blocked { opacity:.46; }
+  label.locked { opacity:.62; }
+  input[type=range] { flex:1; }
+  select,input[type=number],button { background:#1e2230; color:#cdd3e0;
+         border:1px solid #333a4e; border-radius:4px; padding:2px 6px; }
+  canvas { image-rendering:pixelated; background:#1e2230; display:block; margin-bottom:8px; }
+  textarea { width:100%; height:170px; background:#101218; color:#9fe8a8;
+         border:1px solid #333a4e; font:11px monospace; }
+  pre { background:#101218; padding:8px; font-size:10px; line-height:1.15;
+        width:100%; min-width:0; overflow:auto; max-height:420px; }
+  #refStrip { display:flex; flex-wrap:wrap; gap:6px; align-items:flex-end; width:100%; }
+  #refStrip img { max-width:100%; object-fit:contain; }
+  .hint { color:#5d6478; font-size:10px; margin:0 0 5px; }
+  h3 { margin:12px 0 4px; font-size:12px; color:#8b93a7; text-transform:uppercase; }
+</style></head><body>
+<div id="controls">
+  <h3>pose</h3>
+  <label><span class="k">anim</span><select id="anim" style="flex:1;min-width:0">
+    <optgroup label="mood bases">
+      <option value="0">idle · content</option><option value="1">meow · needy</option>
+      <option value="2">sleeping · sleepy</option>
+    </optgroup>
+    <optgroup label="reactions">
+      <option value="3">licking</option><option value="4">stretching</option><option value="5">itch</option>
+    </optgroup>
+    <optgroup label="mood gestures">
+      <option value="6">kneading · content</option><option value="7">begging · needy</option>
+      <option value="8">yawning · sleepy</option><option value="9">please · needy</option>
+      <option value="10">tail hug · content</option><option value="11">nodding · sleepy</option>
+      <option value="12">slow blink · content</option><option value="13">sniff · needy</option>
+      <option value="14">waking · sleepy</option>
+      <option value="20">tiny protest · needy</option><option value="21">curl up · sleepy</option>
+    </optgroup>
+    <optgroup label="grooming · content">
+      <option value="15">face wash · 3 lick/swipes</option>
+      <option value="16">foreleg wash · 4 licks</option>
+      <option value="17">belly wash · reclined</option>
+    </optgroup>
+    <optgroup label="affection · content">
+      <option value="18">adoring gaze · looks up at you</option>
+      <option value="19">head bunt · content</option>
+    </optgroup>
+    <optgroup label="play · content">
+      <option value="22">pounce · crouch, wiggle, jump</option>
+    </optgroup>
+  </select></label>
+  <!-- Own row: appended to the anim row this pushed `play` past the 328px column, reachable
+       only by horizontally scrolling the controls pane. -->
+  <label><span class="k">phase</span><input type="number" id="phase" min="0" max="1" step="0.01" value="0" style="width:64px">
+  <button id="play" style="flex:1">play</button></label>
+  <div id="stateSliders"></div>
+  <h3>pose overrides <button id="poseReset" style="float:right;font-size:10px">reset overrides</button></h3>
+  <div class="hint">orange = active override; dependent state controls dim when bypassed</div>
+  <div id="poseSliders"></div>
+  <h3>leg rig</h3>
+  <div id="legRigSliders"></div>
+  <h3>preset</h3>
+  <label><span class="k">marking</span><select id="marking">
+    <option value="0">none</option><option value="1">stripes</option><option value="2">patch</option>
+    <option value="3" selected>stripes+blaze</option>
+  </select></label>
+  <label><span class="k">flat</span><input type="checkbox" id="flat" title="Structural/debug view; not the shipped style">
+  <span class="k">outline</span><input type="checkbox" id="outline" title="Optional silhouette diagnostic/style experiment"></label>
+  <!-- Own label, not appended to flat/outline's: a label's text click activates its FIRST
+       control, so "mirror" as a third span in that label silently toggled `flat` instead. -->
+  <label><span class="k">mirror</span><input type="checkbox" id="mirror" title="Exact scene-facing flip; shading travels with the cat (device: coin flip per treatcat visit)"></label>
+  <div id="presetSliders"></div>
+  <h3>C struct (two-way; paste path into CAT_PRESET[])</h3>
+  <textarea id="struct" spellcheck="false"></textarea>
+</div>
+<div id="stage">
+  <h3 id="scaleLabel">&times;P (screen size)</h3>
+  <canvas id="c3"></canvas>
+  <h3 id="refHead" style="display:none">art reference
+    <span style="text-transform:none;color:#5d6478">— click to enlarge; drag the slider to match head height</span>
+    <input type="range" id="refZoom" min="40" max="320" step="4" value="110" style="width:120px;vertical-align:middle">
+  </h3>
+  <div id="refStrip"></div>
+  <h3>diagnostics</h3>
+  <pre id="diag">-</pre>
+</div>
+<script>
+'use strict';
+// [name, min, max, step, default] — names must match cat_tune_main.cpp's arg table
+const PRESET = [
+  // cell-unit ranges doubled with the 112x104 re-grid; chub/head/eye are ratios and did not.
+  // The DEFAULTS here are only a fallback for an older binary — seedFromBinary() overwrites them
+  // with the real CAT_PRESET[0] on load (and widens any range too narrow to hold it). The ranges
+  // are still authored: they are the useful tuning band, which the preset alone can't tell us.
+  //
+  // GEOMETRIC ceilings, measured 2026-07-30 (every field grown from the shipped value over all six
+  // poses x outline on/off until diag.clipped fires or the silhouette fragments):
+  //     chub 1.80 | head 2.32 | ear 24+ | earPoint 1.0+ | tailLen 32+ | fluff 20+ | eye 4.0+
+  // Only chub and head have a ceiling anywhere near a plausible value; the rest are clean far past
+  // any sane setting. So these ranges are TASTE, not safety, and no slider here can currently ship
+  // a broken cat — useful to know before a customizer exposes them to people who are not us.
+  // DO widen freely for a new look; do NOT take chub past 1.80 or head past 2.32 without re-measuring.
+  // ear range re-scaled with the capsule rewrite: earLen is now reach BEYOND the skull for a
+  // round-tipped capsule, not a triangle's height. The chibi references sit well above the old
+  // 2.5-cell nubs; the shipped 6/0.5 ear reads as a proper rounded triangle. 14 remains available
+  // as a deliberate stress/taste endpoint, still far inside the 24+ geometric ceiling.
+  ['chub', 0.6, 1.5, 0.01, 1.18], ['head', 0.7, 1.4, 0.01, 1.38], ['ear', 0, 14, 0.1, 6],
+  ['earPoint', 0, 1, 0.05, 0.5], ['tailLen', 6, 16, 0.2, 10.0], ['fluff', 2, 9, 0.1, 4.8], ['eye', 0.6, 1.6, 0.01, 1.46],
+  ['breatheRate', 0.5, 4, 0.05, 1.1], ['tailRate', 0.5, 5, 0.05, 1.35],
+  // the lamp. azimuth 0 = from the right, 90 = from below; elevation 90 = straight at the cat
+  ['lightDeg', 0, 360, 1, 227.6], ['lightEl', 0, 89, 1, 35.3], ['contrast', 0, 2, 0.02, 1.0],
+];
+const STATE = [
+  ['blend', 0, 1, 0.01, 1], ['aTail', 0, 6.283, 0.01, 0], ['aBreathe', 0, 6.283, 0.01, 0],
+  ['headYaw', 0, 1, 0.01, 0.3], ['blinkT', 0, 120, 1, 0], ['twitchT', 0, 260, 5, 0],
+];
+// Every CatPose float a pose author has to choose, scrubbable. `bodyYaw` used to live in STATE
+// as the one hand-built override; the other twelve had NO control at all, which is why the five
+// unauthored poses stalled — you cannot pick meow's mouthOpen, sleeping's eyeOpen or stretching's
+// legLift, or find where each one breaks, against a parameter nobody can reach.
+// These are OVERRIDES: untouched sliders send nothing and mirror what the keyframe chose (the
+// binary's `poseAll:` line). Ranges are the useful authoring band, not a containment claim —
+// setSlider widens any that a mirrored value overshoots, and that overshoot is itself a finding.
+const POSE = [
+  // Foundation fields were originally omitted even though the host already accepts every
+  // CatPose slot. Facial overrides alone cannot author a sleeping loaf or a long stretch.
+  ['bodyX', 45, 75, 0.5, 60], ['bodyY', 55, 85, 0.5, 75],
+  ['bodyRx', 18, 40, 0.5, 28], ['bodyRy', 10, 30, 0.5, 22], ['breathe', 0, 3, 0.1, 1.2],
+  ['headDx', -20, 20, 0.5, 0], ['headDy', -40, 0, 0.5, -30], ['headR', 14, 26, 0.5, 20],
+  ['bodyYaw', 0, 1, 0.01, 0.3], ['tilt', -0.6, 0.6, 0.01, 0],
+  ['earL', -0.5, 0.5, 0.01, 0], ['earR', -0.5, 0.5, 0.01, 0],
+  // eyeOpen 0 is a CARET (content, eyes-closed-happy); any small positive value is a flat BAR.
+  // Sleeping uses the caret at 0; the low positive "bar" values read as two black slabs here.
+  ['eyeOpen', 0, 1.3, 0.01, 1],
+  // 0.50 is the measured head-size-independent max: past it the oval's bottom crosses the skull
+  // and furOnly cuts a flat chin. The real crossing is 0.55 (headSize 0.8) to 0.80 (1.2), so the
+  // slider stops at the worst case rather than at a value that only some coats survive.
+  ['mouthOpen', 0, 0.5, 0.01, 0],
+  // Legacy renderer names: the chibi eye is solid black, so these move its white catchlight.
+  ['pupilDx', -2, 2, 0.5, 0], ['pupilDy', -2, 2, 0.5, 0],
+  // The tail projector folds every joint back inside the grid. tailBase is still capped at 4.1
+  // because values past that author the same folded-up root instead of a useful new silhouette;
+  // tailCurl keeps the full stress band needed by the unfinished lick/stretch/itch poses.
+  ['tailBase', 0, 4.1, 0.05, 2.6], ['tailCurl', -1.5, 1.5, 0.05, -0.2],
+  ['tailSwish', -1, 1, 0.05, 0],
+  ['legFwd', -10, 10, 0.5, 0],
+  ['legLift0', 0, 1, 0.01, 0], ['legLift1', 0, 1, 0.01, 0],
+  ['legLift2', 0, 1, 0.01, 0], ['legLift3', 0, 1, 0.01, 0],
+];
+// Universal skeleton proportions, deliberately outside CatPreset. Tune them here, then copy
+// the chosen defaults into cat_proc.h; coat variants should not have different anatomy rigs.
+const RIG = [
+  ['rearX', -0.55, 0.05, 0.01, -0.40], ['frontX', 0.10, 0.65, 0.01, 0.40],
+  ['hock', 0, 0.30, 0.01, 0.16], ['rearSet', 0, 6, 0.2, 3.0],
+  ['pawScale', 0.65, 1.10, 0.01, 0.86], ['ground', 0, 8, 0.5, 6.0],
+  ['earInner', 0.2, 0.8, 0.02, 0.5], ['eyeK', 0.50, 0.66, 0.001, 0.592],
+  // Kept in the request/diagnostic path, but locked below: 0 is the only measured value that
+  // keeps every viable leading inner ear through the authored yaw band.
+  ['earYaw', 0, 0.8, 0.01, 0.0],
+];
+// State the binary evolves for itself. It re-simulates from catInit every frame, so sending
+// these back while playing re-advanced the whole elapsed span ON TOP of the mirrored value —
+// sim time grew ~quadratically and the preview ran away. Mirror them for display only.
+const EVOLVED = new Set(['headYaw', 'aTail', 'aBreathe']);
+// pal slot order = the CI_* enum in cat_proc.h; defaults = preset 0 (orange tabby).
+// Fur (1-4) and accent (5-8) are 4-step ramps, but only the BASE of each is authored — the
+// other three derive, mirroring CAT_RAMP4 in the header. Slots marked 0 below are filled in
+// by rampInto() before every render.
+// Fallback only, same as the PRESET defaults: seedFromBinary() replaces this with the compiled-in
+// CAT_PRESET[0] before the first render.
+let pal = [0, 0, 0xECA7, 0, 0,  0, 0xA2A2, 0, 0,
+           0x0000, 0x8AC4, 0xE474, 0xE4F1, 0x3903, 0xFFFF, 0xF3D0];
+const $ = id => document.getElementById(id), vals = {};
+const DISPLAY = { pupilDx: 'catchlightX', pupilDy: 'catchlightY' };
+const HELP = {
+  bodyX: 'Pose-local body centre in grid cells.',
+  bodyY: 'Pose-local body centre in grid cells; lower values move the sleeping silhouette up.',
+  bodyRx: 'Unscaled body half-width; preset chub is applied after this.',
+  bodyRy: 'Base body half-height before chub and the breathing accumulator.',
+  breathe: 'Vertical breathing amplitude in grid cells; the preset controls its speed.',
+  headDx: 'Head offset from the body centre before body-facing projection.',
+  headDy: 'Head offset from the body centre; more negative lifts the head.',
+  headR: 'Unscaled head radius; preset head size is applied after this.',
+  headYaw: 'Authored poses stop at 0.24; 0.24–1.0 is a geometry stress test.',
+  pupilDx: 'Legacy field pupilDx: moves the white catchlight, not a pupil.',
+  pupilDy: 'Legacy field pupilDy: moves the white catchlight, not a pupil.',
+  ground: 'Taste floor is 0; negative values hide the paws inside the body.',
+  eyeK: 'Taste band around the shipped 0.592; wider values push the eyes into the skull rim.',
+  earYaw: 'Locked at 0: every positive tested gain loses a leading inner ear in preset space.',
+};
+const OVERRIDE_CONFLICTS = { eyeOpen: 'blinkT', tailSwish: 'aTail' };
+let playing = false, playT0 = 0, playPhase0 = 0, timer;
+function slider(host, [k, mn, mx, st, dv]) {
+  vals[k] = dv;
+  const l = document.createElement('label');
+  l.title = HELP[k] || '';
+  l.innerHTML = `<span class="k">${DISPLAY[k] || k}</span><input type="range" min="${mn}" max="${mx}" step="${st}" value="${dv}"><span class="v">${dv}</span>`;
+  const inp = l.querySelector('input');
+  inp.oninput = () => {
+    vals[k] = parseFloat(inp.value);
+    l.querySelector('.v').textContent = inp.value;
+    syncOverrideUI(); syncText(); queue();
+  };
+  $(host).appendChild(l); return inp;
+}
+const inputs = {};
+PRESET.forEach(s => inputs[s[0]] = slider('presetSliders', s));
+STATE.forEach(s => inputs[s[0]] = slider('stateSliders', s));
+POSE.forEach(s => inputs[s[0]] = slider('poseSliders', s));
+RIG.forEach(s => inputs[s[0]] = slider('legRigSliders', s));
+inputs.earYaw.disabled = true;
+inputs.earYaw.parentElement.classList.add('locked');
+// undefined = "don't send it" for every pose override, so the rig opens showing the KEYFRAME's
+// pose, not a JS default. Touching a slider is what turns it into an override.
+function syncOverrideUI() {
+  for (const [k] of POSE) {
+    const effective = vals[k] !== undefined && !(playing && k === 'tailSwish');
+    inputs[k].parentElement.classList.toggle('override', effective);
+  }
+  for (const [pose, state] of Object.entries(OVERRIDE_CONFLICTS)) {
+    const blocked = vals[pose] !== undefined && !(playing && pose === 'tailSwish');
+    inputs[state].disabled = blocked;
+    inputs[state].parentElement.classList.toggle('blocked', blocked);
+    inputs[state].title = blocked
+      ? `${state} is bypassed by the active ${DISPLAY[pose] || pose} override; reset overrides to scrub it`
+      : (HELP[state] || '');
+  }
+}
+function poseToKeyframe() { POSE.forEach(([k]) => vals[k] = undefined); syncOverrideUI(); }
+poseToKeyframe();
+vals.headYaw = undefined;                  // first render seeds head facing from the pose too
+$('poseReset').onclick = () => { poseToKeyframe(); queue(); };
+
+// mirrors of catDim()/catLit() in cat_proc.h. The ramps are DERIVED, never authored here:
+// leaving a step at the literal 0 would paste a preset that blits black on device.
+const dim = (c, k) => ((((c >> 11 & 0x1F) * k | 0) << 11) | (((c >> 5 & 0x3F) * k | 0) << 5) | ((c & 0x1F) * k | 0));
+const lit = (c, k) => ((((c >> 11 & 0x1F) + (31 - (c >> 11 & 0x1F)) * k | 0) << 11) |
+                       (((c >>  5 & 0x3F) + (63 - (c >>  5 & 0x3F)) * k | 0) <<  5) |
+                        ((c       & 0x1F) + (31 - (c       & 0x1F)) * k | 0));
+function rampInto(at) {   // at = band-0 slot; at+1 holds the authored base
+  const base = pal[at + 1];
+  pal[at] = lit(base, 0.34); pal[at + 2] = dim(base, 0.70); pal[at + 3] = dim(base, 0.48);
+}
+function structText() {
+  rampInto(1); rampInto(5);
+  const f = k => vals[k].toFixed(2) + 'f';
+  return `{ ${f('chub')}, ${f('head')}, ${f('ear')}, ${f('earPoint')}, ${f('tailLen')}, ${f('fluff')}, ${f('eye')}, ${$('marking').value}, ${$('flat').checked ? 1 : 0}, ${$('outline').checked ? 1 : 0}, ${f('breatheRate')}, ${f('tailRate')},\n  { ${pal.map(p => '0x' + p.toString(16).toUpperCase().padStart(4, '0')).join(', ')} } }`;
+}
+function syncText() { $('struct').value = structText(); }
+// A value outside a slider's range would silently CLAMP, and the clamped value is what then gets
+// sent to the binary — so the rig would render something the struct does not say. That is exactly
+// how earLen became unreachable when it changed meaning (preset 2.5, slider min 4). Widen instead.
+function setSlider(k, v) {
+  const i = inputs[k];
+  if (v < +i.min) i.min = v;
+  if (v > +i.max) i.max = v;
+  vals[k] = v; i.value = v;
+  i.parentElement.querySelector('.v').textContent = v;
+}
+function applyStruct(text) {   // parse every number back, in CatPreset field order
+  const n = text.match(/0x[0-9a-fA-F]+|-?\d+\.?\d*/g);
+  if (!n || n.length < 28) return false;
+  const ord = ['chub', 'head', 'ear', 'earPoint', 'tailLen', 'fluff', 'eye', 'marking', 'flat', 'outline', 'breatheRate', 'tailRate'];
+  ord.forEach((k, i) => {
+    if (k === 'marking') { $('marking').value = parseInt(n[i]); return; }
+    if (k === 'flat' || k === 'outline') { $(k).checked = !!parseInt(n[i]); return; }
+    setSlider(k, parseFloat(n[i]));
+  });
+  pal = n.slice(12, 28).map(x => parseInt(x));
+  return true;
+}
+$('struct').oninput = () => { if (applyStruct($('struct').value)) queue(); };
+$('marking').onchange = () => { syncText(); queue(); };
+$('flat').onchange = $('outline').onchange = () => { syncText(); queue(); };
+$('mirror').onchange = () => queue();   // render state, not a preset field -- no struct sync
+// Phase is inert for any pose whose keyframes are flat (idle is two identical keys). Blend is also
+// meaningless in idle even though the host now seeds a safe blendFrom. Grey both out rather than
+// leave live-looking controls that do nothing.
+function syncPhase() { const flat = $('anim').value === '0'; $('phase').disabled = flat || playing;
+  $('phase').title = flat ? 'idle has flat keyframes — motion comes from the accumulators'
+                           : playing ? 'stop playback to scrub phase' : '';
+  inputs.blend.disabled = flat;
+  inputs.blend.title = flat ? 'idle has no transition source — blend stays at 1' : '';
+  if (flat && vals.blend !== 1) setSlider('blend', 1);
+}
+// undefined = "don't send it, let the binary decide" — the diag mirror seeds the slider back
+// Switching pose drops every override too: a mouthOpen scrubbed for meow must not silently
+// follow you into sleeping and read as the keyframe's own choice.
+// Phase restarts at the top too. It is a position within THIS pose's keyframes, so carrying it
+// across a pose change lands you in the middle of the new one -- and since playback mirrors the
+// evolved phase back into the input every frame, the number you inherit is wherever you last
+// happened to stop. playT0/playPhase0 re-latch with it: leaving playT0 alone would hand the next
+// frame the whole span since playback started and jump straight back into the animation.
+$('anim').onchange = () => { vals.headYaw = undefined; poseToKeyframe();
+  $('phase').value = 0; playT0 = performance.now(); playPhase0 = 0;
+  syncPhase(); queue(); };
+$('phase').oninput = () => queue();
+syncPhase();
+
+// A finished CP_ONCE anim leaves the mirrored phase parked at 1.00, and the binary clamps it
+// there — latching that would make every replay render the end-hold forever. Loops are safe
+// either way (the binary wraps 1.0 -> 0), so rewinding at 1 changes nothing for them.
+$('play').onclick = () => { playing = !playing; $('play').textContent = playing ? 'stop' : 'play';
+  syncOverrideUI(); syncPhase();
+  if (playing) { if (parseFloat($('phase').value) >= 1) $('phase').value = 0;
+    clearTimeout(timer);              // a pre-play queued render would start a second chain
+    playT0 = performance.now(); playPhase0 = parseFloat($('phase').value); render(); } };
+// While playing, the rAF chain already re-renders every frame with the live vals — a queued
+// render would just start a SECOND concurrent chain (its tail re-arms rAF too), one more per
+// slider touch, multiplying fetches and letting out-of-order responses draw time jitter.
+// One chain is the invariant: queue() is for the stopped rig only.
+function queue() { if (playing) return; clearTimeout(timer); timer = setTimeout(render, 40); }
+// Every way playback ends goes through here so the controls can't desync from the flag —
+// the old inline stop in the !ok path skipped syncPhase and left the phase input disabled.
+function stopPlayback() {
+  if (!playing) return;
+  playing = false; $('play').textContent = 'play';
+  syncOverrideUI(); syncPhase();
+}
+
+const off = document.createElement('canvas');   // sized from the render header on first frame
+async function render() {
+  // Latch it: `playing` can flip during the awaited fetch (that IS what stop does), and a frame
+  // requested as a playing frame must also be mirrored as one. Reading the live flag after the
+  // await made the stop frame skip the mirror, leaving the sliders exactly one frame behind the
+  // canvas. The rAF re-arm at the bottom is the one place that must still read the live flag.
+  const play = playing;
+  const q = new URLSearchParams();
+  q.set('anim', $('anim').value);
+  q.set('marking', $('marking').value);
+  q.set('flat', $('flat').checked ? 1 : 0);
+  q.set('outline', $('outline').checked ? 1 : 0);
+  q.set('mirror', $('mirror').checked ? 1 : 0);
+  // During playback advanceMs is the whole span since playT0, so keep sending the latched start
+  // phase. The input itself mirrors the evolved phase below; sending that mirror back as the next
+  // starting point would add elapsed time twice and make the animation accelerate.
+  q.set('phase', play ? playPhase0 : $('phase').value);
+  for (const [k] of PRESET) q.set(k, vals[k]);
+  for (const [k] of STATE) if (vals[k] !== undefined && !(play && EVOLVED.has(k))) q.set(k, vals[k]);
+  // Pose overrides: only the ones actually touched. tailSwish is written from the tail
+  // accumulator every frame, so sending it during playback would pin the swish mid-swing.
+  for (const [k] of POSE)
+    if (vals[k] !== undefined && !(play && k === 'tailSwish')) q.set(k, vals[k]);
+  for (const [k] of RIG) q.set(k, vals[k]);
+  pal.forEach((p, i) => q.set('pal' + i, p));
+  // ponytail: the binary re-simulates the whole span from catInit each frame, so the cap bounds
+  // per-frame work — but it also freezes playback once reached. 10 min is past any tuning session;
+  // if that ever bites, round-trip the full CatRenderState and send a per-frame delta instead.
+  if (play) q.set('advanceMs', Math.min(performance.now() - playT0, 600000));   // real catAdvance server-side
+  // relative, not '/render': behind a reverse proxy the page lives under a path prefix
+  // (nullphase /catss/), and a root-absolute fetch escapes the proxy. Relative resolves
+  // against the document, so it works at localhost:8484/ and behind any prefix alike.
+  // The try covers the whole network phase (fetch AND body read): either rejects when
+  // cat_tune.py is mid-restart rebuilding the binary, and an uncaught rejection killed the
+  // rAF chain with `playing` stuck true — the button read "stop" while nothing rendered,
+  // and since queue() no-ops during playback, no slider touch could revive it.
+  let all;
+  try {
+    // no-store, not a nonce param: the same slider values after a rebuild are the same URL, and
+    // Chrome served two variant renders from cache once (they read pixel-identical; a server-side
+    // curl diff found 81 differing cells). The binary changes under a fixed URL, so it must never
+    // be cached at all.
+    const response = await fetch('render?' + q, {cache: 'no-store'});
+    if (!response.ok) {
+      $('diag').textContent = `render failed (${response.status})\n${await response.text()}`;
+      stopPlayback();
+      return;
+    }
+    all = new Uint8Array(await response.arrayBuffer());
+  } catch (e) {
+    $('diag').textContent = `render fetch failed — server restarting?\n${e}`;
+    stopPlayback();
+    return;
+  }
+  const nl = all.indexOf(10);            // "<GW> <GH> <P>\n" — the binary declares its own grid
+  const [GW, GH, P] = new TextDecoder().decode(all.subarray(0, nl)).split(' ').map(Number);
+  const end = nl + 1 + GW * GH * 3;
+  const px = all.subarray(nl + 1, end), img = new ImageData(GW, GH);
+  for (let i = 0; i < GW * GH; i++) {
+    img.data[i * 4] = px[i * 3]; img.data[i * 4 + 1] = px[i * 3 + 1];
+    img.data[i * 4 + 2] = px[i * 3 + 2]; img.data[i * 4 + 3] = 255;
+  }
+  if (off.width !== GW) { off.width = GW; off.height = GH; }   // resizing clears it — only on change
+  off.getContext('2d').putImageData(img, 0, 0);
+  $('scaleLabel').textContent = `×${P} (screen size)`;
+  {
+    const cv = $('c3');
+    if (cv.width !== GW * P) { cv.width = GW * P; cv.height = GH * P; }
+    const g = cv.getContext('2d'); g.imageSmoothingEnabled = false;
+    g.clearRect(0, 0, cv.width, cv.height); g.drawImage(off, 0, 0, GW * P, GH * P);
+  }
+  const diag = new TextDecoder().decode(all.subarray(end));
+  $('diag').textContent = diag;
+  const pm = diag.match(/pose: anim=\d+ phase=([-\d.]+)/);
+  if (pm && play) $('phase').value = parseFloat(pm[1]).toFixed(2);
+  // Two reasons to write a slider from the binary's own state: seeding one we deliberately
+  // didn't send (so it shows what the pose chose), and mirroring the evolved ones while
+  // playing (so pausing leaves the controls describing the frame you stopped on).
+  const m = diag.match(/headYaw=([-\d.]+) bodyYaw=([-\d.]+) aTail=([-\d.]+) aBreathe=([-\d.]+)/);
+  if (m) ['headYaw', 'aTail', 'aBreathe'].forEach(k => {
+    if (vals[k] !== undefined && !(play && EVOLVED.has(k))) return;
+    const v = parseFloat(m[{ headYaw: 1, aTail: 3, aBreathe: 4 }[k]]);
+    vals[k] = v; inputs[k].value = v;
+    inputs[k].parentElement.querySelector('.v').textContent = v.toFixed(2);
+  });
+  // Same idea for the pose overrides, off the binary's `poseAll:` line: a slider we did NOT send
+  // displays whatever the keyframe evaluated to. setSlider (not a raw .value write) because a
+  // keyframe is free to sit outside the authoring band these ranges guess at — clamping there
+  // would show a number the render does not use, which is the exact bug the earLen range once had.
+  const pa = diag.match(/^poseAll: (.*)$/m);
+  if (pa) {
+    const got = {};
+    for (const kv of pa[1].trim().split(/\s+/)) {
+      const [k, v] = kv.split('=');
+      got[k] = parseFloat(v);
+    }
+    for (const [k] of POSE)
+      if (vals[k] === undefined && got[k] !== undefined) {
+        setSlider(k, got[k]);
+        vals[k] = undefined;                 // a mirror is still un-sent, not an override
+      }
+  }
+  if (playing) requestAnimationFrame(render);
+}
+// Seed the whole preset from the binary that is about to render it, so the rig cannot open on a
+// cat that exists nowhere. The alternative — hand-copying CAT_PRESET[0] into the defaults above —
+// drifted twice in one session, once silently serving the previous cat and once with a slider
+// range too narrow to reach the new value. An older binary prints no `preset:` line; the built-in
+// defaults stand in that case and the rig still works.
+async function seedFromBinary() {
+  try {
+    const buf = await (await fetch('render', {cache: 'no-store'})).arrayBuffer();   // relative + no-store: see render()
+    // Pixels first, text after — decode non-fatally and match the line rather than parsing the
+    // header, so this stays correct if the diagnostic block grows.
+    const m = new TextDecoder('utf-8').decode(new Uint8Array(buf)).match(/^preset: (.*)$/m);
+    if (m && applyStruct(m[1])) return;
+  } catch (e) { /* fall through to the built-in defaults */ }
+  console.warn('[cat_tune] no preset: line — using built-in defaults, which may be stale');
+}
+seedFromBinary().then(() => { syncText(); render(); });
+
+// Art-reference strip. references/ is gitignored, so /refs answering with nothing is the normal
+// case for a fresh clone — leave the whole section hidden rather than show an empty heading.
+// One shared zoom, because the point is comparing PROPORTION against the canvas above, and
+// per-image sizes would defeat that.
+(async () => {
+  let names = [];
+  try { names = (await (await fetch('refs')).text()).split('\n').filter(Boolean); } catch (e) { return; }
+  if (!names.length) return;
+  $('refHead').style.display = '';
+  const strip = $('refStrip');
+  names.forEach(n => {
+    const img = document.createElement('img');
+    img.src = 'ref?f=' + encodeURIComponent(n);
+    img.title = n;
+    img.style.cssText = 'height:110px;background:#fff;border-radius:3px;cursor:zoom-in';
+    img.onclick = () => { const big = img.style.height === '110px' || !img.dataset.big;
+      img.dataset.big = big ? '1' : ''; img.style.height = big ? '360px' : $('refZoom').value + 'px'; };
+    strip.appendChild(img);
+  });
+  $('refZoom').oninput = () => {
+    for (const img of strip.children) { img.dataset.big = ''; img.style.height = $('refZoom').value + 'px'; }
+  };
+})();
+</script></body></html>

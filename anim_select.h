@@ -41,6 +41,17 @@ inline uint8_t stepFavorite(uint64_t mask, uint8_t cur, int delta) {
   return cur;
 }
 
+// The carousel's scrollable list: exactly the ids nextFavorite() walks, ascending. Lives here
+// beside nextFavorite so the two cannot drift apart, and so the invariant is testable.
+inline int carouselList(uint64_t mask, uint8_t* out, int cap) {
+  mask &= PLAYABLE_MASK;
+  if (mask == 0) mask = PLAYABLE_MASK;
+  int n = 0;
+  for (int id = 0; id < ANIM_COUNT && n < cap; id++)
+    if (mask & (1ull << id)) out[n++] = (uint8_t)id;
+  return n;
+}
+
 // Power-on animation id. mode "fixed" -> fixedId, "random" -> randomPick, anything else -> resumeId.
 // Non-playable (debug, reserved holes, garbage) -> 0 (carried Phase-1 review item: startupId bound).
 inline uint8_t resolveStartupId(const std::string& mode, uint8_t fixedId,

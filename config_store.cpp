@@ -15,3 +15,18 @@ void saveConfig(const Config& c) {
   p.putString("cfg", configToJson(c).c_str());
   p.end();
 }
+
+uint32_t treatsLoad() {
+  Preferences p;
+  p.begin("ocellus", true);
+  uint32_t t = p.getUInt("treats", 0);
+  p.end();
+  return t;
+}
+
+void treatsSave(uint32_t treats) {
+  Preferences p;
+  p.begin("ocellus", false);
+  p.putUInt("treats", treats);
+  p.end();
+}

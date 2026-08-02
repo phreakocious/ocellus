@@ -56,7 +56,10 @@ def fit_circle(pts):
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "out/body.stl"
     tris = check.load(path)
-    z = 17.8                                 # just inside the front face, below the fillet
+    z = check.bbox(tris)[1][2] - 0.6         # 0.6 below the front face -- tracks cell
+                                             # thickness (was a stale 17.8: the 702030
+                                             # +1mm raised the front 18.4->19.4 and this
+                                             # slice cut into the module taper below it)
     pts = section(tris, z)
     inner = [p for p in pts if math.hypot(*p) < 21.0]
     outer = [p for p in pts if math.hypot(*p) >= 21.5]

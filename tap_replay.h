@@ -1,6 +1,6 @@
 #pragma once
 // Host-side loader + replay for .tap captures -- the snare tuning rig
-// One parser shared by
+// (docs/superpowers/specs/2026-07-14-snare-tuning-rig-design.md). One parser shared by
 // tools/snare_sweep.cpp and test/test_audio_capture so the two can never disagree about the
 // format. NEVER compiled into firmware (build_src_filter excludes tools/ and test/; a root
 // header costs nothing). Arduino-free, like audio.*.

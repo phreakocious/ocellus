@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flash ocellus</title>
 <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+<script type="module" src="./jelly.js"></script>
 <style>
   :root { color-scheme: dark; }
   body {
@@ -12,7 +13,8 @@
     background: #0d0f12; color: #e6e6e6;
     font: 16px/1.6 system-ui, -apple-system, Segoe UI, sans-serif;
   }
-  main { max-width: 34rem; padding: 2rem 1.5rem; text-align: center; }
+  jelly-card { max-width: 34rem; }
+  main { padding: 2rem 1.5rem; text-align: center; }
   h1 { font-weight: 600; letter-spacing: .02em; }
   ol { text-align: left; color: #b7bdc6; }
   li { margin: .4rem 0; }
@@ -20,27 +22,60 @@
   code { background: #191c22; padding: .1rem .35rem; border-radius: 4px; }
   esp-web-install-button { display: inline-block; margin: 1.5rem 0; }
   .hint { color: #8a919b; font-size: .9rem; margin-top: 2rem; }
+  .storage { text-align: left; margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid #232830; }
+  .storage h2 { font-size: 1rem; font-weight: 600; margin: 0 0 .5rem; }
+  .storage p { color: #b7bdc6; font-size: .92rem; }
+  .storage .hint { margin-top: .75rem; }
   .unsupported, .not-allowed { color: #ff8a8a; }
+  /* ponytail: :not(:defined) fallback — until jelly.js registers (or if the vendored
+     file ever fails to load) the layout stays sane and the Install button still works. */
+  jelly-theme:not(:defined), jelly-card:not(:defined) { display: block; }
+  jelly-button:not(:defined) {
+    display: inline-block; background: #2563eb; color: #fff; border: 0;
+    border-radius: 10px; padding: .7rem 1.4rem; font: inherit; font-weight: 600; cursor: pointer;
+  }
 </style>
 </head>
 <body>
+<jelly-theme mode="dark">
+<jelly-card>
 <main>
   <h1>ocellus firmware installer</h1>
   <p>Flashes the eye directly from this page — no software to install.</p>
 
   <ol>
-    <li>One-time: install the <a href="https://www.wch-ic.com/downloads/CH343SER_EXE.html">CH343 USB driver</a>, then reboot if it asks.</li>
-    <li>Plug the board into USB. Use <b>Chrome</b> or <b>Edge</b> (easiest — Safari won't work).</li>
-    <li>Click <b>Install</b> below, pick the board's COM port, and let it run.</li>
+    <li><b>macOS only:</b> install the <a href="https://files.waveshare.com/wiki/common/CH34XSER_MAC.7z">CH34x USB driver</a> (unzip, run it, approve in System Settings &rarr; Privacy &amp; Security, reboot if asked). Windows and Linux need no driver.</li>
+    <li>Plug the board into USB. Use <b>Chrome</b> or <b>Edge</b> on a computer (Safari won't work).</li>
+    <li>Click <b>Install</b> below, pick the board's serial port, and let it run.</li>
   </ol>
 
   <esp-web-install-button manifest="./manifest.json">
+    <jelly-button slot="activate">Install</jelly-button>
     <span slot="unsupported" class="unsupported">Open this page in Chrome or Edge on a computer.</span>
     <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS.</span>
   </esp-web-install-button>
 
-  <p class="hint">If no port appears, the driver isn't installed yet (step 1).<br>
-  If it appears but won't connect, hold <code>BOOT</code>, tap <code>RESET</code>, release <code>BOOT</code>, then Install again.</p>
+  <div class="storage">
+    <h2>About the pictures and GIFs on your eye</h2>
+    <p>Slideshow images and animated GIFs live in a <b>separate area of the chip from the firmware</b>,
+    so re-flashing from this page normally leaves them alone — <b>unless you tick “erase device”</b>,
+    which wipes everything and gives you an eye with no pictures on it.</p>
+    <p>There is about <b>13.9&nbsp;MB</b> of space, shared between images and GIFs. A typical GIF is
+    0.1–1.5&nbsp;MB, so that is roughly 15–20 of them. The
+    <a href="../">config page</a> lists what is on the device and how much room is left, and lets you
+    delete or replace any clip by name.</p>
+    <p class="hint">Uploading a GIF through the config page takes about <b>a minute per clip</b> —
+    it goes over the same slow serial link as the settings. That is fine for swapping one or two.
+    Loading a whole set is much faster from a terminal
+    (<code>tools/flash.py &lt;target&gt; --gifs SET</code>, ~150&nbsp;s for any number of clips).</p>
+  </div>
+
+  <p class="hint">No serial port in the picker? On macOS, finish step 1's driver.
+  If it still won't appear or won't connect, hold <code>BOOT</code>, tap <code>RESET</code>, release <code>BOOT</code>, then click Install again.</p>
+
+  <p>Already flashed? <a href="../">Configure your eye &rarr;</a></p>
 </main>
+</jelly-card>
+</jelly-theme>
 </body>
 </html>

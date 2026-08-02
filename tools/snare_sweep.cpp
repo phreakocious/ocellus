@@ -1,5 +1,5 @@
-// Offline grid sweep of the snare detector constants over .tap captures
-// Links the REAL
+// Offline grid sweep of the snare detector constants over .tap captures (spec
+// docs/superpowers/specs/2026-07-14-snare-tuning-rig-design.md section 4). Links the REAL
 // audio.cpp -- a reimplementation would be the thing under test drifting from the thing shipped.
 //
 //   c++ -std=c++17 -I. tools/snare_sweep.cpp audio.cpp -o /tmp/snare_sweep

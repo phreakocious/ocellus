@@ -1,6 +1,7 @@
 #include <unity.h>
 #include "../../config.h"
 #include "../../palette.h"
+#include "../../animations.h"   // ANIM_COUNT: the "unknown id" the favorites test needs
 
 void test_roundtrip_preserves_fields() {
     Config a;
@@ -146,6 +147,21 @@ void test_slideshow_sec_default_and_clamp() {
     TEST_ASSERT_EQUAL_UINT16(60, d.slideshowSec);
 }
 
+void test_gif_sec_default_and_clamp() {
+    Config c;
+    TEST_ASSERT_EQUAL_UINT16(6, c.gifSec);                       // default, distinct from slideshowSec
+    TEST_ASSERT_TRUE(configFromJson("{\"gifSec\": 12}", c));
+    TEST_ASSERT_EQUAL_UINT16(12, c.gifSec);
+    TEST_ASSERT_EQUAL_UINT16(5, c.slideshowSec);                 // the two must not be coupled
+    TEST_ASSERT_TRUE(configFromJson("{\"gifSec\": 0}", c));       // 0 -> clamp to 1
+    TEST_ASSERT_EQUAL_UINT16(1, c.gifSec);
+    TEST_ASSERT_TRUE(configFromJson("{\"gifSec\": 999}", c));     // > 60 -> 60
+    TEST_ASSERT_EQUAL_UINT16(60, c.gifSec);
+    Config d;
+    TEST_ASSERT_TRUE(configFromJson(configToJson(c), d));
+    TEST_ASSERT_EQUAL_UINT16(60, d.gifSec);
+}
+
 void test_cycle_fields_roundtrip_and_clamp() {
     Config a;
     TEST_ASSERT_EQUAL_UINT16(0, a.cycleSec);                    // defaults: off, follow favorites
@@ -179,7 +195,9 @@ void test_stay_awake_usb_roundtrips() {
 
 void test_qr_fields_roundtrip_and_validate() {
     Config a;
-    TEST_ASSERT_EQUAL_UINT8(0, a.qrSize);                             // default: unconfigured
+    TEST_ASSERT_EQUAL_UINT8(25, a.qrSize);                           // default: the nullphase.net/oc QR (fresh device works out of the box)
+    TEST_ASSERT_EQUAL_STRING("https://nullphase.net/oc/", a.qrText.c_str());
+    TEST_ASSERT_EQUAL_UINT(158u, (unsigned)a.qrBits.size());          // 25x25 packed: ceil(625/8)*2
     a.qrText = "https://nullphase.net/oc/";
     a.qrSize = 25;
     a.qrBits = "a5";                                                  // content irrelevant to the codec
@@ -211,9 +229,22 @@ void test_qr_module_unpacks_msb_first_row_major() {
 
 void test_favorites_drop_reserved_holes() {
     Config c;
-    TEST_ASSERT_TRUE(configFromJson("{\"favorites\":[3,34,46,38,42],\"cycleAnims\":[46,41]}", c));
-    TEST_ASSERT_EQUAL_UINT64((1ull << 3) | (1ull << 34) | (1ull << 38), c.favoritesMask);  // 46 (unknown) + 42 (debug) dropped
-    TEST_ASSERT_EQUAL_UINT64(1ull << 41, c.cycleMask);                                     // 46 (unknown) dropped
+    // The "unknown id" here is ANIM_COUNT, not a literal: it is by definition one past the last
+    // playable, so it stays unknown as ids are added. Hardcoding it broke this test twice (47 when
+    // Greetz landed, 48 when the GIF player did).
+    const std::string unknown = std::to_string(ANIM_COUNT);
+    TEST_ASSERT_TRUE(configFromJson("{\"favorites\":[3," + unknown + ",38,42],\"cycleAnims\":["
+                                    + unknown + ",41]}", c));
+    TEST_ASSERT_EQUAL_UINT64((1ull << 3) | (1ull << 38), c.favoritesMask);  // unknown + 42 (debug) dropped
+    TEST_ASSERT_EQUAL_UINT64(1ull << 41, c.cycleMask);                      // unknown dropped
+}
+
+void test_catVariant_clamps_out_of_range() {
+  Config c;
+  TEST_ASSERT_TRUE(configFromJson("{\"catVariant\":3}", c));
+  TEST_ASSERT_EQUAL_UINT8(3, c.catVariant);
+  TEST_ASSERT_TRUE(configFromJson("{\"catVariant\":9}", c));   // out of 0..5
+  TEST_ASSERT_EQUAL_UINT8(0, c.catVariant);
 }
 
 int main(int, char**) {
@@ -228,10 +259,12 @@ int main(int, char**) {
     RUN_TEST(test_maxfps_roundtrips_and_clamps);
     RUN_TEST(test_sb_palette_roundtrips);
     RUN_TEST(test_slideshow_sec_default_and_clamp);
+    RUN_TEST(test_gif_sec_default_and_clamp);
     RUN_TEST(test_cycle_fields_roundtrip_and_clamp);
     RUN_TEST(test_stay_awake_usb_roundtrips);
     RUN_TEST(test_qr_fields_roundtrip_and_validate);
     RUN_TEST(test_qr_module_unpacks_msb_first_row_major);
     RUN_TEST(test_favorites_drop_reserved_holes);
+    RUN_TEST(test_catVariant_clamps_out_of_range);
     return UNITY_END();
 }

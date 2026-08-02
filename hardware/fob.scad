@@ -1,4 +1,4 @@
-// ocellus fob enclosure
+// ocellus fob enclosure -- docs/superpowers/specs/2026-07-13-fob-enclosure-design.md
 //
 // z = 0 is the BACK face, +z toward the screen. -Y is the USB end, +Y the lug.
 //
@@ -181,6 +181,35 @@ bay_r    = sqrt(pow(bay[0]/2, 2) + pow(bay[1]/2, 2));   // corner reach
 // the pocket into the bay. The board then sits 1.3mm above it, on its pads.
 pocket_z = back_h + bay_h - plate_h;
 total_h  = pocket_z + pocket_h;
+
+/* ---- module retention: rim supports (anti-rock) + crush ribs (anti-spin) ----
+   The board seats on the -Y usb pad and the +Y GPIO shelf -- BOTH on the Y axis,
+   so at +-X it is unsupported and pressing a side see-saws about that line (the
+   cavity floor drops ~1.3mm below the PCB rest plane there). And the pocket is a
+   bare friction fit on an undersize, unit-varying module, so it also spins.
+   rim_support() pads each +-X edge up to the rest plane -> 4-point base;
+   crush_rib() adds thin ribs the module compresses on insertion, taking up each
+   unit's lateral gap. Both UNIONed after the board_void cut, like usb_pad. Derived
+   (needs pocket_z), so a future cell-thickness change carries them along. All of
+   it is tuned on the coupon before the batch. */
+board_rest = pocket_z + 2.5;      // 10.8 -- PCB rest plane (2.5 above pocket floor)
+rim_x      = 18.0;    // +-X pad centre (outer edge merges into the ~19.3 wall)
+rim_w      = 3.0;     // pad X size
+rim_l      = 6.0;     // pad Y size (Y-spread resists the see-saw)
+rim_drop   = 0.1;     // pad top this far below board_rest, so a proud print can't tilt
+                      // the board onto it: the +-Y seats keep defining rest; the pad
+                      // only catches the see-saw. 0 = true coplanar 4-point.
+wall_in    = 19.3;    // pocket wall inner face at +-X, y=0 (measured off body.stl)
+rib_inter  = 0.40;    // crush interference: rib tip inboard of wall_in. Two ribs take up
+                      // ~2x this of the pocket-to-board gap (measured ~1mm on the coupon).
+                      // Undersize modules crush less; the tilt-in eases seating. PLA shaves
+                      // more than it squishes -- back off if it won't seat, up if it spins.
+rib_w      = 0.9;     // rib footprint along the wall (triangular section -> crushes)
+rib_dy     = 3.0;     // two ribs per side at +-rib_dy: resists rotation, not just centres
+rib_z0     = pocket_z + 3.7;   // ~12 -- rib z-band: the module's glass edge, clear of
+rib_z1     = pocket_z + 8.0;   // ~16 -- the seat below AND bezel.py's z=17.8 reveal
+                               // slice above (ribs poking into it read as a non-round
+                               // reveal and fail the uniform-bezel check)
 
 /* ---- slider derived ---- */
 floor_z    = pocket_z + plate_h;                 // 8.5 -- pad plane / recess floor
@@ -433,6 +462,33 @@ module usb_pad()
         }
     }
 
+// Anti-rock. A pad under each +-X module edge, from the pocket floor up to the PCB
+// rest plane, so the board seats on FOUR points instead of the two -Y/+Y seats it
+// see-saws on. Its outer edge runs into the wall (merges, stiffer); clipped to the
+// envelope so it cannot bulge the skin. UNIONed after board_void, like usb_pad.
+module rim_support()
+    intersection() {
+        for (s = [-1, 1])
+            translate([s * rim_x, 0, pocket_z])
+                linear_extrude(board_rest - rim_drop - pocket_z)
+                    offset(r = 0.8) square([rim_w - 1.6, rim_l - 1.6], center = true);
+        translate([0, 0, pocket_z - 1]) envelope();
+    }
+
+// Anti-spin. Two triangular ribs per side on the +-X pocket wall, tip rib_inter
+// inboard of the wall, over the module's glass edge. The undersize/varying module
+// shaves or compresses them on the USB-first tilt-in, taking up its own gap so it
+// cannot rotate. Triangular so it crushes rather than blocks; y=0 stays clear.
+module crush_rib()
+    for (s = [-1, 1], dy = [-rib_dy, rib_dy])
+        translate([0, 0, rib_z0])
+            linear_extrude(rib_z1 - rib_z0)
+                polygon([
+                    [s * wall_in,             dy - rib_w/2],
+                    [s * wall_in,             dy + rib_w/2],
+                    [s * (wall_in - rib_inter), dy],
+                ]);
+
 // A radial ear. Prints in-plane with the disc -- no supports -- and a lanyard
 // loads it ALONG the layer lines, the strong direction.
 module lug()
@@ -459,6 +515,8 @@ module fob()
             translate([0, lug_reach, -1]) cylinder(d = lug_hole_d, h = total_h + 2);
         }
         usb_pad();
+        rim_support();
+        crush_rib();
     }
 
 if (part == "body")

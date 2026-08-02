@@ -121,12 +121,12 @@ def find_port(want_ch343):
     return None
 
 
-def run(cmd, tries=1):
+def run(cmd, tries=1, env=None):
     for i in range(tries):
         if i:
             print(f"  retry {i+1}/{tries} (CH343 upload drops with 'Device not configured'/errno 6 -- transient)")
         print("+", " ".join(cmd))
-        if subprocess.run(cmd).returncode == 0:
+        if subprocess.run(cmd, env=env).returncode == 0:
             return 0
     return 1
 
@@ -139,6 +139,9 @@ def main():
     ap.add_argument("--only-anim", action="store_true",
                     help="don't build or flash at all -- just switch the running board to --anim")
     ap.add_argument("--port", help="skip the probe and use this port (e.g. a blank board)")
+    ap.add_argument("--gifs", metavar="SET",
+                    help="upload a baked GIF set to the filesystem and nothing else "
+                         "(no firmware build or flash) -- bake it first with tools/bake_gif.py --set SET")
     args = ap.parse_args()
     tgt = TARGETS[args.target]
 
@@ -159,6 +162,26 @@ def main():
         print(f"anim {args.anim}: {send_anim(port, args.anim)}")
         return
 
+    # GIF sets live on LittleFS, which is a different partition from the firmware -- so loading a
+    # a unit's memes never needs a rebuild or a reflash. This is also the only sane bulk path:
+    # uploadfs writes the whole set in ~150 s, where the same bytes through the Web Serial gif_chunk
+    # protocol (115200, base64, per-chunk acks) would take ~22 minutes. Serial is for swapping ONE
+    # clip on a unit already in someone's hands; this is for loading a set.
+    # PLATFORMIO_DATA_DIR is PlatformIO's own override for data_dir, so no ini edit is involved.
+    if args.gifs:
+        d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "build", "gifs", args.gifs)
+        if not os.path.isdir(d):
+            sys.exit(f"no baked set at {d}\n  bake it first: python3 tools/bake_gif.py --set {args.gifs}")
+        n = len(glob.glob(os.path.join(d, "*.gif")))
+        if not n:
+            sys.exit(f"{d} has no .gif in it -- uploading it would just erase the board's "
+                     f"filesystem.\n  bake it first: python3 tools/bake_gif.py --set {args.gifs}")
+        print(f"uploading {n} clips from {d} (filesystem only -- firmware untouched)")
+        rc = run([PIO, "run", "-e", tgt["env"], "-t", "uploadfs", "--upload-port", port],
+                 tries=3, env={**os.environ, "PLATFORMIO_DATA_DIR": d})
+        sys.exit(rc and "filesystem upload failed (Web Serial tab holding the port?)")
+
     if not args.no_build and run([PIO, "run", "-e", tgt["env"]]) != 0:
         sys.exit("build failed")
 
@@ -175,12 +198,33 @@ def main():
         print(f"anim {args.anim}: {send_anim(back, args.anim)}")
 
 
-def send_anim(port, anim_id):
-    s = _open(port)
-    try:
-        return _reply(s, {"cmd": "anim", "id": anim_id})
-    finally:
-        s.close()
+def send_anim(port, anim_id, tries=6):
+    """Select an animation, retrying until the device actually echoes {"type":"anim"}.
+
+    The first attempt after a flash usually fails: the board is still in setup() (display init,
+    LittleFS mount, NVS read) and the command lands on a UART that isn't being drained yet. The
+    failure is NOT an error reply -- it is None, or a {"err": ...}, or a stale echo of some other
+    command. All three mean "too early, ask again", which is why a bare send looks like it worked
+    and silently leaves the board on its startup mode.
+
+    Hand-rolled as a shell loop three sessions running (2026-07-28 twice, 2026-07-30) before
+    landing here. If it still reports None after this many tries, the board is genuinely not
+    answering and retrying harder will not help.
+    """
+    for attempt in range(tries):
+        try:
+            s = _open(port)
+        except Exception:
+            time.sleep(1.0)
+            continue
+        try:
+            v = _reply(s, {"cmd": "anim", "id": anim_id})
+        finally:
+            s.close()
+        if isinstance(v, dict) and v.get("type") == "anim":
+            return v
+        time.sleep(1.0)
+    return None
 
 
 if __name__ == "__main__":

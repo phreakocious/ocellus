@@ -1,6 +1,6 @@
 {
   "name": "ocellus",
-  "version": "1.0",
+  "version": "dev",
   "new_install_prompt_erase": true,
   "builds": [
     {

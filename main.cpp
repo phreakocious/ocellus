@@ -9,6 +9,7 @@
 #include "config_store.h"
 #include "protocol.h"
 #include "anim_select.h"
+#include "carousel.h"
 #include "animations.h"
 #include "matrix_name.h"
 #include "bounce_splash.h"
@@ -24,6 +25,11 @@
 #include "fluid.h"
 #include "slide_proto.h"
 #include "slide_store.h"
+#include "gif_store.h"
+#include <AnimatedGIF.h>
+#include "treatcat.h"
+#include "greetz.h"
+#include "vga_font.h"
 #if OCELLUS_AUDIO
 #include <WiFi.h>
 #include <esp_now.h>
@@ -50,6 +56,9 @@ static int gBatSimMv = 0;              // {"cmd":"batsim","mv":N} override for b
 // 2026-07-16). Boards without a divider read no-cell -> inert -> false; sleepMin=0 is their tool.
 
 void renderSlideshow(uint32_t now);
+static void greetzOnEnter();           // defined near renderGreetz; onAnimEnter calls it on entry
+static void gifRelease();              // defined near renderGif; onAnimEnter frees the decoder on exit
+static void carouselOverlay();          // defined above loop(); draws the carousel name strip
 #if OCELLUS_AUDIO
 void resetBloom();
 void renderAudioDebug(uint32_t now);
@@ -103,6 +112,24 @@ static SlideUpload gSlideUp;
 volatile bool gSlideUploading = false;   // true while a slide upload is mid-flight (loop skips render)
 volatile bool gSlidesDirty = true;       // set when slide set changes; renderSlideshow re-scans (Task 6)
 static uint32_t gSlideRxMs = 0;          // last slide-command timestamp (upload watchdog)
+// GIF player (id GIF_ID). Same shape as the slide plumbing above, with one difference that drives
+// everything: clips are keyed by NAME, not index, because `flash.py --gifs SET` writes a whole set
+// straight to LittleFS via uploadfs and those files have human names. See gif_store.h.
+static LittleFsGifStore gGifStore;
+static GifUpload gGifUp;
+volatile bool gGifUploading = false;     // true while a gif upload is mid-flight (loop skips render)
+volatile bool gGifsDirty    = true;      // clip set changed (or first entry); renderGif re-scans
+static uint32_t gGifRxMs = 0;            // last gif-command timestamp (upload watchdog)
+// Playback state -- up here for the same reason as the slideshow's: onAnimEnter touches it.
+static AnimatedGIF* gGif = nullptr;      // allocated on mode entry, freed on exit -- MEASURED 5,008 B
+                                         // on the board, not the ~25KB the spec estimated
+static GifMeta  gGifList[GIF_MAX];
+static int      gGifIdx = 0, gGifCount = 0;
+static bool     gGifOpen = false;        // a clip is currently open on the decoder
+static uint32_t gGifClipStartMs = 0;     // when the current clip started (hold timer)
+static uint32_t gGifNextFrameMs = 0;     // honor the GIF's own per-frame delay
+static int      gGifLoops = 0;           // completed loops of the current clip
+
 // Slideshow (id SLIDESHOW_ID) playback state -- declared up here (not beside renderSlideshow, below)
 // because onAnimEnter (well above renderSlideshow in the file) resets gSlideIdx on mode entry.
 static int      gSlideIdx = 0, gSlideCount = 0;
@@ -111,6 +138,21 @@ static int      gSlidePhase = 0;    // 0 STEADY, 1 FADE-OUT, 2 FADE-IN
 static int      gSlideStep = 0;
 static const int SLIDE_FADE_STEPS = 8;
 void triggerRareEvent(int which);   // defined after the EyeEvent enum; bench trigger below
+
+// --- Animation carousel (spec 2026-08-01) -------------------------------------------------
+// Waveshare-only: it is the only board with a touch panel. The S3-Zero's encoder already does
+// this job with stepFavorite().
+static Carousel gCarousel;
+static volatile bool gCarouselOpen  = false;   // read by buttonReadTask to suppress the legacy swipe handlers
+static volatile bool gCarouselReq = false;   // swipe-up latch, set in the button task, drained in loop()
+static uint32_t gCarouselIdleMs = 0;      // millis of the last MOVEMENT (down or coasting); the strip hides 2s after it goes still
+static uint32_t gCarouselDownMs = 0;      // when the CURRENT continuous finger-down began
+static uint32_t gCarouselTickMs = 0;      // for the dt handed to Carousel::tick
+static bool     gCarouselWasDown = false; // edge-detect finger-up so release() fires exactly once
+static uint8_t  gCarouselApplied = 0xFF;  // last id THIS carousel applied; compared instead of currentAnimId, which other writers (button, serial) also move
+static bool     gCarouselMoved = false;   // has the user actually scrubbed since opening?
+static const uint32_t CAROUSEL_HIDE_MS = 2000;
+static const uint32_t CAROUSEL_STUCK_MS = 30000;  // a single touch held this long is a wedged bus, not a gesture
 
 void pollConfigSerial() {
   while (Serial.available()) {
@@ -127,6 +169,12 @@ void pollConfigSerial() {
         Serial.printf("{\"type\":\"bat\",\"mv\":%d,\"usb\":%s}\n", readBatteryMv(), gBatt.usbPowered() ? "true" : "false");
         g_rxbuf.clear(); continue;
       }
+      {   // {"cmd":"pet"} / {"cmd":"petsim","full":N,"en":N} -> read or force the pet stats
+        char petOut[128];
+        if (treatcatPetCmd(g_rxbuf.c_str(), petOut, sizeof petOut)) {
+          Serial.println(petOut); g_rxbuf.clear(); continue;
+        }
+      }
       if (g_rxbuf.find("\"batsim\"") != std::string::npos) {   // {"cmd":"batsim","mv":3400} -> feed a fake mV (0 = real ADC)
         size_t p = g_rxbuf.find("\"mv\"");
         gBatSimMv = (p != std::string::npos) ? atoi(g_rxbuf.c_str() + g_rxbuf.find(':', p) + 1) : 0;
@@ -136,6 +184,16 @@ void pollConfigSerial() {
 #if OCELLUS_AUDIO
       if (handleTapCmd(g_rxbuf)) { g_rxbuf.clear(); continue; }   // {"cmd":"tap",...} -- device state, lives beside "bat", not in protocol.cpp
 #endif
+      if (isGifCmd(g_rxbuf)) {
+        bool isUpload = false, changedGifs = false;
+        std::string resp = handleGifLine(g_rxbuf, gGifStore, gGifUp, isUpload, changedGifs);
+        gGifUploading = isUpload;
+        gGifRxMs = millis();
+        if (changedGifs) gGifsDirty = true;
+        Serial.println(resp.c_str());
+        g_rxbuf.clear();
+        continue;
+      }
       if (isSlideCmd(g_rxbuf)) {
         bool isUpload = false, changedSlides = false;
         std::string resp = handleSlideLine(g_rxbuf, gSlideStore, gSlideUp, isUpload, changedSlides);
@@ -164,7 +222,7 @@ void pollConfigSerial() {
 }
 
 // --- HARDWARE PINS ---
-#if defined(BOARD_WAVESHARE_128)   // Waveshare ESP32-S3-Touch-LCD-1.28 (shipping target)
+#if defined(BOARD_WAVESHARE_128)   // Waveshare ESP32-S3-Touch-LCD-1.28 (primary target)
 #define TFT_MOSI 11
 #define TFT_SCLK 10
 #define TFT_CS    9
@@ -250,10 +308,15 @@ constexpr uint8_t kBaseRotation = 3;   // 3, not 1: confirmed on the bench -- 1 
 constexpr uint8_t kBaseRotation = 0;
 #endif
 
+// Rotation currently applied to the panel (0 or 2). Defined here, next to the only writer;
+// declared in touch.h because it is the touch layer's normalization input. It lived in
+// treatcat.cpp until 2026-08-01, which was an accident of which feature needed it first.
+uint8_t gAppliedRot = 0;
+
 // Every setRotation goes through here. Screens that lock an orientation (the debug screens, Fluid) are
 // asking for one relative to the mount, not to the panel's native axes -- so the offset has to be added
 // at every site, not just in applyConfig().
-static inline void setPanelRotation(uint8_t r) { gfx->setRotation((r + kBaseRotation) & 3); }
+static inline void setPanelRotation(uint8_t r) { gAppliedRot = r; gfx->setRotation((r + kBaseRotation) & 3); }
 
 // --- RTC MEMORY & MODES ---
 RTC_DATA_ATTR uint8_t currentAnimId = 0;   // flat registry id 0-40 (incl. debug); RTC so `resume` survives deep-sleep
@@ -476,7 +539,7 @@ static bool g_pipesReset = false;   // Pipes accumulates on a non-cleared canvas
 static bool gWfEnter = false;
 static bool gEchoEnter = false;   // same contract as gWfEnter, for Echo (id 41 = ECHO_ID)
 
-// Drawdown + demo state.
+// Drawdown + demo state (see docs/superpowers/specs/2026-07-14-audio-drawdown-demo-design.md).
 // Declared up here (like gWfEnter) because onAnimEnter resets them. gDemoSnap/gDemo* are filled
 // once per idle frame in loop() and read by the audio idle branches.
 static DrawdownState gDrawdown = { true, 0, 0, BACKOFF_BASE_MS };
@@ -486,7 +549,7 @@ static bool          gDemoBeat, gDemoSnare, gDemoSpark;
 #endif
 
 static uint32_t eyePersonalityHash(uint8_t theme) {
-  uint32_t h = 2166136261u;   // FNV-1a; stable per owner/theme, no persisted config needed
+  uint32_t h = 2166136261u;   // FNV-1a; stable per unit/theme, no persisted config needed
   for (char ch : gConfig.name) { h ^= (uint8_t)ch; h *= 16777619u; }
   h ^= (uint32_t)theme + 0x9E3779B9u; h *= 16777619u;
   h ^= ((uint32_t)gConfig.irisColor << 16) | gConfig.skinColor;
@@ -772,6 +835,8 @@ void onAnimEnter(uint8_t id) {
   if (id == EYE_COUNT) { for (int i = 0; i < 24; i++) initMatrixColumn(i); assignMatrixNameCols(); }  // Matrix (first effect): fresh columns + name columns
   if (id == PIPES_ID) g_pipesReset = true;                                // clear stale frame from the prior effect
   if (id == FLUID_ID) resetFluid();                                       // fresh liquid on entry
+  if (id == TREATCAT_ID) treatcatOnEnter();   // drop a stale tap + any in-progress fortune (keeps the endless treat count)
+  if (id == GREETZ_ID) greetzOnEnter();       // fresh shuffle + offset on every entry
 #if OCELLUS_AUDIO
   if (id == WATERFALL_ID) gWfEnter = true;                                // fresh history + drained pend column, not a replay of the last visit
   if (id == ECHO_ID) gEchoEnter = true;                                   // fresh ring + drained pend column
@@ -790,6 +855,8 @@ void onAnimEnter(uint8_t id) {
 #endif
   backlightSet(effectiveBrightness());          // undo any in-progress slideshow fade so the next mode is full-bright
   if (id == SLIDESHOW_ID) { gSlideIdx = 0; gSlidesDirty = true; }   // fresh scan + first-slide load
+  if (id == GIF_ID) { gGifIdx = 0; gGifsDirty = true; }             // fresh scan + first-clip open
+  else gifRelease();   // leaving the GIF mode: hand the decoder's 5KB back
 }
 // fill a quad (corners in perimeter order) via BOTH diagonals --- GFX's scanline fillTriangle can drop a 1px seam
 // between two triangles sharing one diagonal; the second split covers whatever the first misses.
@@ -882,18 +949,30 @@ void buttonReadTask(void *pvParameters) {
     TouchGesture tg = touchPoll();             // Waveshare touch; TOUCH_NONE elsewhere
     if (tg != TOUCH_NONE) { g_lastGesture = (int)tg; g_lastGestureMs = millis(); }  // for the sensor-debug screen
     switch (tg) {
-      case TOUCH_SWIPE_RIGHT:                   // next enabled anim (mirrors singleClick)
-        g_pendingAnim = nextFavorite(gConfig.favoritesMask, animBase());
+      case TOUCH_SWIPE_UP:
+        gCarouselReq = true;                    // flag-only; loop() builds the list and opens it
         lastInteractionTime = millis();
         break;
+      case TOUCH_SWIPE_RIGHT:                   // next enabled anim (mirrors singleClick)
+        if (gCarouselOpen) break;               // the carousel owns the horizontal axis while it is up:
+        g_pendingAnim = nextFavorite(gConfig.favoritesMask, animBase());   // a drag ends in a swipe on release,
+        lastInteractionTime = millis();                                    // which would jump one step PAST the flick
+        break;
       case TOUCH_SWIPE_LEFT:                    // previous enabled anim
+        if (gCarouselOpen) break;
         g_pendingAnim = prevFavorite(gConfig.favoritesMask, animBase());
         lastInteractionTime = millis();
         break;
-      case TOUCH_TAP:                           // jitter, eye modes only (mirrors doubleClick)
+      case TOUCH_TAP:
         lastInteractionTime = millis();
-        if (currentAnimId < EYE_COUNT) { isJittering = true; jitterEndTime = millis() + 500; }
+        if (gCarouselOpen) break;               // no confirm gesture, and a tap through the strip must not feed the cat
+        if (currentAnimId == TREATCAT_ID) {                 // feed instead of jitter; flag-only (SPI-safe)
+          int tx = touchLastX, ty = touchLastY;
+          tx = tx < 0 ? 0 : (tx > 239 ? 239 : tx); ty = ty < 0 ? 0 : (ty > 239 ? 239 : ty);
+          gTreatTap = (1u << 31) | ((uint32_t)tx << 12) | (uint32_t)ty;
+        } else if (currentAnimId < EYE_COUNT) { isJittering = true; jitterEndTime = millis() + 500; }
         break;
+      case TOUCH_SWIPE_DOWN:                    // reserved for the on-device anim config (own TODO)
       case TOUCH_NONE:
         break;
     }
@@ -1016,12 +1095,15 @@ void multiClick() {
     // Triple again pages to the next debug screen (sensor -> audio -> waterfall -> wrap); on the
     // console the encoder does the same paging, which is the gesture you actually want there.
     g_pendingAnim = stepDebug(base, 1);
-  } else if (clicks == 4) {  // easter egg: hop into / advance the effect group (13..37, then 45, then 46..54, wrap)
+  } else if (clicks == 4) {  // easter egg: hop into / advance the effect group (13..37, then 45..55, wrap)
     g_pendingAnim = (base < EYE_COUNT) ? EYE_COUNT
-                  : (base == EYE_COUNT + EFFECT_COUNT - 1) ? SWIRL_ID   // last low effect -> the 45+ block
-                  : (base == SWIRL_ID) ? ATLAS_BASE                     // Swirl -> first ported effect (46)
-                  : (base >= ATLAS_BASE) ? (base + 1 < ANIM_COUNT ? (uint8_t)(base + 1) : EYE_COUNT)   // 46..53 -> +1; 54 wraps to Matrix
-                  : (uint8_t)(EYE_COUNT + ((base - EYE_COUNT + 1) % EFFECT_COUNT));   // defer apply to loop()
+                  : (base == EYE_COUNT + EFFECT_COUNT - 1) ? SWIRL_ID   // 37 -> 45
+                  : (base == SWIRL_ID) ? TREATCAT_ID                    // 45 -> 46
+                  : (base == TREATCAT_ID) ? GREETZ_ID                   // 46 -> 47
+                  : (base == GREETZ_ID) ? GIF_ID                        // 47 -> 48
+                  : (base == GIF_ID) ? ATLAS_BASE                       // 48 -> 49 (first ported effect)
+                  : (base >= ATLAS_BASE) ? (base + 1 < ANIM_COUNT ? (uint8_t)(base + 1) : EYE_COUNT)  // 49..54 -> +1; 55 wraps to Matrix
+                  : (uint8_t)(EYE_COUNT + ((base - EYE_COUNT + 1) % EFFECT_COUNT));
   }
 }
 
@@ -1309,7 +1391,7 @@ static volatile uint16_t gGapHead = 0, gGapFill = 0;
 // (integer, WiFi task); audioBin's curve is monotonic, so curving at drain time is identical.
 static volatile uint16_t gWfPend[NUM_FREQS] = {0};
 
-// --- serial spectrum tap (snare tuning rig) ---
+// --- serial spectrum tap (snare tuning rig, spec docs/superpowers/specs/2026-07-14-snare-tuning-rig-design.md §1) ---
 // SPSC ring: onEspNowRecv (WiFi task) owns head, drainTap (loop task) owns tail. 64 entries is
 // ~366ms at ~175 pkt/s -- headroom for a slow frame, not a working set (steady state ~3 deep).
 // Always resident (8.4KB static internal RAM, C3 included): a debug facility that must be
@@ -1642,6 +1724,133 @@ void fractalBranch(float x, float y, float dx, float dy, int depth) {
   fractalBranch(ex, ey, dx * fr1x - dy * fr1y, dx * fr1y + dy * fr1x, depth + 1);
 }
 
+// --- GIF PLAYER (id GIF_ID) : animated GIFs from LittleFS via bitbank2/AnimatedGIF --------------
+// Clips are baked host-side to 240x240 / 12 fps / 64 colours by tools/bake_gif.py; the device only
+// decodes. Measured on the board 2026-08-01: 38 ms/frame worst case (busy photographic
+// content) against 12 fps's 83 ms budget, so decode is not the constraint -- see the spec.
+//
+// The framebuffer persists between frames on purpose: that is what makes the GIF disposal modes
+// (restore-to-background / restore-to-previous) work without a second buffer, so GIF_ID is in the
+// no-clear list in renderFrame.
+static File gGifFile;
+
+static void* gifOpenCb(const char* fname, int32_t* pSize) {
+  gGifFile = LittleFS.open(fname, "r");
+  if (!gGifFile) return nullptr;
+  *pSize = gGifFile.size();
+  return (void*)&gGifFile;
+}
+static void gifCloseCb(void*) { if (gGifFile) gGifFile.close(); }
+static int32_t gifReadCb(GIFFILE* pFile, uint8_t* pBuf, int32_t iLen) {
+  int32_t want = iLen;
+  if (pFile->iSize - pFile->iPos < want) want = pFile->iSize - pFile->iPos;
+  if (want <= 0) return 0;
+  int32_t got = gGifFile.read(pBuf, want);
+  pFile->iPos = gGifFile.position();
+  return got;
+}
+static int32_t gifSeekCb(GIFFILE* pFile, int32_t iPosition) {
+  gGifFile.seek(iPosition);
+  pFile->iPos = (int32_t)gGifFile.position();
+  return pFile->iPos;
+}
+
+// Palette index -> RGB565 straight into the canvas framebuffer. Clipped on every side: a clip that
+// was not produced by bake_gif.py can be any size, and a hand-uploaded one is entirely possible.
+static void gifDrawCb(GIFDRAW* pDraw) {
+  int y = pDraw->iY + pDraw->y;
+  if (y < 0 || y >= 240) return;
+  int x0 = pDraw->iX, w = pDraw->iWidth;
+  if (x0 < 0) { w += x0; x0 = 0; }
+  if (x0 + w > 240) w = 240 - x0;
+  if (w <= 0) return;
+
+  uint16_t* d = (uint16_t*)canvas->getFramebuffer() + y * 240 + x0;
+  uint8_t*  s = pDraw->pPixels + (x0 - pDraw->iX);
+  uint16_t* pal = pDraw->pPalette;
+  if (pDraw->ucHasTransparency) {
+    const uint8_t tr = pDraw->ucTransparent;
+    for (int x = 0; x < w; x++) { uint8_t p = s[x]; if (p != tr) d[x] = pal[p]; }
+  } else {
+    for (int x = 0; x < w; x++) d[x] = pal[s[x]];
+  }
+}
+
+static void gifCloseClip() {
+  if (gGifOpen && gGif) gGif->close();
+  gGifOpen = false;
+}
+
+// Free the decoder when leaving the mode. Measured 5,008 B returned on the board (heap
+// 109,428 -> 114,436 switching away) -- the spec guessed ~25KB, which would have been worth
+// worrying about; 5KB is not, and this stays only because it is two lines.
+static void gifRelease() {
+  gifCloseClip();
+  if (gGif) { delete gGif; gGif = nullptr; }
+}
+
+static bool gifOpenClip(int i) {
+  gifCloseClip();
+  if (!gGif || i < 0 || i >= gGifCount) return false;
+  char path[GIF_NAME_MAX + 8]; gifPath(path, sizeof path, gGifList[i].name);
+  if (!gGif->open(path, gifOpenCb, gifCloseCb, gifReadCb, gifSeekCb, gifDrawCb)) return false;
+  gGifOpen = true;
+  gGifLoops = 0;
+  gGifClipStartMs = millis();
+  gGifNextFrameMs = 0;                 // decode the first frame immediately
+  canvas->fillScreen(BLACK);           // a clip smaller than the panel must not sit on the last one
+  return true;
+}
+
+static void gifNote(const char* a, const char* b) {
+  canvas->fillScreen(BLACK);
+  canvas->setTextColor(gfx->color565(130, 130, 130));
+  canvas->setTextSize(2); canvas->setCursor(48, 104); canvas->print(a);
+  if (b) { canvas->setTextSize(1); canvas->setCursor(52, 140); canvas->print(b); }
+}
+
+void renderGif(uint32_t now) {
+  if (!gGif) {                                   // allocated here, not in onAnimEnter, so a failed
+    gGif = new (std::nothrow) AnimatedGIF();      // alloc redraws its notice every frame instead of
+    if (gGif) {                                   // leaving whatever was on screen before
+      gGif->begin(GIF_PALETTE_RGB565_LE);
+      gGifsDirty = true;
+    }
+  }
+  if (!gGif) { gifNote("No memory", "for GIF decoder"); return; }
+
+  if (gGifsDirty) {
+    gifCloseClip();
+    gGifCount = gGifStore.list(gGifList, GIF_MAX);
+    if (gGifIdx >= gGifCount) gGifIdx = 0;
+    gGifsDirty = false;
+    if (gGifCount > 0 && !gifOpenClip(gGifIdx)) gGifCount = 0;   // unreadable -> fall to empty state
+  }
+  if (gGifCount == 0) { gifNote("No GIFs", "upload via config"); return; }
+
+  if (now < gGifNextFrameMs) return;             // not due yet; the framebuffer still holds the frame
+
+  int delayMs = 0;
+  int rc = gGif->playFrame(false, &delayMs);     // false: we do our own pacing, never block the loop
+  if (delayMs < 20) delayMs = 20;                // a 0ms-delay clip would spin the decoder flat out
+  gGifNextFrameMs = now + (uint32_t)delayMs;
+
+  if (rc <= 0) {                                 // end of clip
+    gGifLoops++;
+    // "N loops or the hold, whichever is longer" -- a 1s clip loops until the hold elapses, a long
+    // one always gets at least one full pass.
+    uint32_t hold = (uint32_t)gConfig.gifSec * 1000UL;
+    bool done = (now - gGifClipStartMs) >= hold;
+    if (done && gGifCount > 1) {
+      gGifIdx = (gGifIdx + 1) % gGifCount;
+      if (!gifOpenClip(gGifIdx)) { gGifsDirty = true; }   // bad file -> re-list next frame
+    } else {
+      gGif->reset();                             // same clip again
+      gGifNextFrameMs = 0;
+    }
+  }
+}
+
 // --- SLIDESHOW (id SLIDESHOW_ID) : full-frame RGB565 slides from LittleFS, fade through black ---
 // (state variables declared near gSlidesDirty, above -- onAnimEnter resets gSlideIdx before this
 // function is even defined in the file, so they can't live down here)
@@ -1754,7 +1963,7 @@ static void renderToasters(uint32_t now) {
   }
 }
 
-// BOIDS (id 36): flocking sketch, ported 1:1 from references/catsoup_pkg/effects.js
+// BOIDS (id 36): partner's flocking sketch, ported 1:1 from references/catsoup_pkg/effects.js
 // ("boids"): alignment + cohesion + short-range separation within a 28px radius, speed-capped,
 // toroidal wrap, triangle facing velocity (unit vector from the speed clamp -- no atan2).
 // In-place update order kept from the JS. O(n^2) with n=32; per-boid float is C3-safe (the
@@ -1800,12 +2009,12 @@ static void renderBoids() {
     canvas->fillTriangle((int)(b.x + 5 * ux),           (int)(b.y + 5 * uy),
                          (int)(b.x - 4 * ux - 3 * uy),  (int)(b.y - 4 * uy + 3 * ux),
                          (int)(b.x - 4 * ux + 3 * uy),  (int)(b.y - 4 * uy - 3 * ux),
-                         pColor(5, i * 8));      // lab cyan -> per-owner palette, flock spans nearby hues
+                         pColor(5, i * 8));      // lab cyan -> per-unit palette, flock spans nearby hues
   }
 }
 
 // ========================== GARDEN EELS (id 37) ==========================
-// Chibi reef, ported full-scene from references/catsoup_pkg/effects.js
+// Partner's chibi reef, ported full-scene from references/catsoup_pkg/effects.js
 // ("gardeneels"): water gradient, god rays, kelp, fish-shadow schools, jellyfish,
 // five undulating chibi eels (bands/spots, sparkle eyes, 5 rotating expressions),
 // sand drawn over the eel bases, a hermit crab that walks in carrying one of 26
@@ -2179,7 +2388,7 @@ static void renderGardenEels(uint32_t now) {
     canvas->drawCircle((int)b.x, (int)b.y, (int)b.r, bubC); }
 }
 
-// SWIRL (id 45): a "procedural fluid" -- iterated domain warp (3 octaves) on the shared
+// SWIRL (id 45): partner's "procedural fluid" -- iterated domain warp (3 octaves) on the shared
 // 256-entry sin LUT, ported 1:1 from references/catsoup_pkg/effects.js ("swirl"; warp 12 /
 // speed 3 baked, ocean palette, lab TS=0.45 time scale). Renders the lab's 64x64 logical grid
 // (integer-only, ~4k px) into an 8 KB heap buffer kept after first entry (Echo's polar-LUT
@@ -2246,7 +2455,7 @@ static void renderSwirl(uint32_t now) {
   }
 }
 
-// ===================== ATLAS: creative-coding lab effects (ids 46..49) =====================
+// ===================== ATLAS: creative-coding lab effects (ids 49..55) =====================
 // Ported from creative_coding/c++/effects.js. The px-grid effects (Julia, Interference, Munching
 // Squares) write a res x res RGB565 grid into the shared fxBuf, then blitUp() bilinear-upscales it
 // into the whole 240 framebuffer -- the same pipeline as renderSwirl (reusing swirlSpread/swirlLerp).
@@ -2268,8 +2477,7 @@ static uint16_t hsv565(float h, float s, float v) {   // p5 HSB source: h 0..360
   return geC565((int)((r+m)*255), (int)((g+m)*255), (int)((b+m)*255));
 }
 
-static uint32_t PAL_plasma[256], PAL_escape[256], PAL_rainbow[256], PAL_spectrum[256], PAL_stained[256],
-                PAL_sunrise[256], PAL_sunset[256];
+static uint32_t PAL_plasma[256], PAL_escape[256], PAL_rainbow[256], PAL_stained[256];   // Globe/Fermat dropped their baked palettes for the config palette engine (pColor)
 static void labBake(uint32_t* pal, const uint8_t* s, int n) {   // s = n rows of {pos,r,g,b}; linear between bracketing stops (== lab makePalette)
   for (int i = 0; i < 256; i++) {
     int k = 0; for (; k < n-1; k++) if (i >= s[k*4] && i <= s[(k+1)*4]) break;
@@ -2283,12 +2491,8 @@ static void atlasInit() {
   static bool done = false; if (done) return; done = true;
   static const uint8_t ST_plasma[]  ={0,20,10,60, 70,150,20,140, 140,235,60,80, 200,250,190,50, 255,255,245,190};
   static const uint8_t ST_escape[]  ={0,0,0,8, 40,20,10,90, 110,10,120,160, 170,230,120,60, 220,255,220,120, 255,0,0,0};
-  static const uint8_t ST_spectrum[]={0,10,0,40, 64,0,120,220, 128,0,200,120, 192,230,200,0, 255,240,40,40};
   static const uint8_t ST_stained[] ={0,10,4,30, 60,180,20,40, 120,20,60,200, 190,20,180,140, 255,240,220,90};
-  static const uint8_t ST_sunrise[] ={0,20,20,60, 60,120,50,120, 120,240,110,90, 180,255,170,80, 230,255,220,130, 255,255,245,200};
-  static const uint8_t ST_sunset[]  ={0,30,10,50, 55,110,25,80, 120,210,45,60, 175,255,110,40, 220,255,175,60, 255,255,225,150};
-  labBake(PAL_plasma, ST_plasma, 5); labBake(PAL_escape, ST_escape, 6); labBake(PAL_spectrum, ST_spectrum, 5); labBake(PAL_stained, ST_stained, 5);
-  labBake(PAL_sunrise, ST_sunrise, 6); labBake(PAL_sunset, ST_sunset, 6);
+  labBake(PAL_plasma, ST_plasma, 5); labBake(PAL_escape, ST_escape, 6); labBake(PAL_stained, ST_stained, 5);
   for (int i = 0; i < 256; i++) {   // rainbow: HSV sweep, matches lab-core.js PAL.rainbow
     float h = i/256.0f*6, x = 1 - fabsf(fmodf(h,2)-1); int sx = (int)h; float r,g,b;
     if (sx==0){r=1;g=x;b=0;} else if (sx==1){r=x;g=1;b=0;} else if (sx==2){r=0;g=1;b=x;}
@@ -2318,8 +2522,8 @@ static void blitUp(int res, bool smooth) {   // generalizes renderSwirl's 64->24
   }
 }
 
-static void renderJulia(uint32_t now) {   // res 140 -- escape-time Julia, c orbits a small circle
-  const int res = 140; uint32_t t = now*9/20; int T = (int)((t*3)>>7);
+static void renderJulia(uint32_t now) {   // res 96 -- escape-time Julia, c orbits a small circle (blitUp upscales to 240)
+  const int res = 96; uint32_t t = now*9/20; int T = (int)((t*3)>>7);
   float cRe = fastSin(T)*0.006f, cIm = fastCos(T)*0.006f;
   const float hw = 1.5f, ctr = res/2.0f;   // centered on the grid, sized to fill the round panel
   for (int y = 0; y < res; y++) for (int x = 0; x < res; x++) {
@@ -2327,7 +2531,7 @@ static void renderJulia(uint32_t now) {   // res 140 -- escape-time Julia, c orb
     while (i < 40) { float nr = zr*zr-zi*zi+cRe, ni = 2*zr*zi+cIm; zr = nr; zi = ni; m2 = zr*zr+zi*zi; if (m2 > 64) break; i++; }
     uint16_t col;
     if (i >= 40) col = to565(PAL_escape[255]);
-    else { float mu = i + 1 - logf(logf(sqrtf(m2)))/0.6931472f; col = to565(PAL_escape[acli((int)(mu/40*255),0,255)]); }
+    else { float mu = i + 1.0f - 64.0f/m2; col = to565(PAL_escape[acli((int)(mu/40*255),0,255)]); }   // cheap continuous shade in [i,i+1) -- was per-pixel logf(logf(sqrt)), ~2 transcendentals/pixel
     fxBuf[y*res+x] = col;
   }
   blitUp(res, true);
@@ -2348,8 +2552,7 @@ static void renderXormunch(uint32_t now) {
   }
   blitUp(res, false);
 }
-static void renderGlobe(uint32_t now) {   // dotted lat/lon sphere spinning about Y, time-based morph burst
-  atlasInit();
+static void renderGlobe(uint32_t now) {   // dotted lat/lon sphere spinning about Y; color = config palette by latitude (pole -> pole)
   float t = now*0.45f;
   canvas->fillScreen(geC565(2,4,8));
   const float cx = 120, cy = 120, R = 240*0.41f;
@@ -2369,8 +2572,8 @@ static void renderGlobe(uint32_t now) {   // dotted lat/lon sphere spinning abou
   float wobT = t*0.001f;
   for (int la = 0; la <= nLat; la++) {
     float phi = (float)la/nLat*3.14159265f, sinP = sinf(phi), cosP = cosf(phi);
-    uint32_t c = PAL_spectrum[(int)((float)la/nLat*255)];
-    int cr = (c>>16)&255, cg = (c>>8)&255, cb = c&255;
+    uint16_t base = pColor(16, (int)((float)la/nLat*255));   // config palette by latitude, slow drift; depth-dimmed per-dot below
+    int cr = ((base>>11)&0x1F)<<3, cg = ((base>>5)&0x3F)<<2, cb = (base&0x1F)<<3;   // RGB565 -> 8-bit for the alpha scale
     for (int lo = 0; lo < nLon; lo++) {
       float theta = (float)lo/nLon*6.2832f;
       float x0 = cosf(theta)*sinP, y0 = cosP, z0 = sinf(theta)*sinP;
@@ -2410,30 +2613,167 @@ static void renderPolarrose(uint32_t now) {   // layered rose curve r = cos(k*th
     }
   }
 }
-static void renderFermat(uint32_t now) {   // Fermat spiral of golden-angle dots, each wobbling (p5-atlas emergent-spiral)
-  atlasInit();
+static void renderFermat(uint32_t now) {   // Fermat spiral of golden-angle dots; color = config palette, core -> rim (p5-atlas emergent-spiral)
   float fc = now*0.06f, t = fc*0.01f;
-  int mode = (int)((now/12000) % 3);   // 0 = rainbow (HSB), 1 = sunrise gradient, 2 = sunset gradient; swaps ~every 12s
-  const uint32_t* grad = mode == 1 ? PAL_sunrise : mode == 2 ? PAL_sunset : nullptr;
-  if (grad) { uint32_t d = grad[0]; canvas->fillScreen(geC565(((d>>16)&255)>>2, ((d>>8)&255)>>2, (d&255)>>2)); }   // bg = dim horizon
-  else canvas->fillScreen(hsv565(270, 0.50f, 0.06f));
+  uint16_t bg = pColor(20, 0);   // dim the palette's leading color for a cohesive horizon
+  canvas->fillScreen(geC565((((bg>>11)&0x1F)<<3)>>2, (((bg>>5)&0x3F)<<2)>>2, ((bg&0x1F)<<3)>>2));
   const float cx = 120, cy = 120, c = 240*0.012f;
   for (int i = 0; i < 1200; i++) {
     float a = i*2.39996f + t*0.1f, r = c*sqrtf((float)i), wob = sinf(t + i*0.05f)*4;
     float x = cx + cosf(a)*(r+wob), y = cy + sinf(a)*(r+wob);
-    uint16_t col = grad ? to565(grad[i*255/1199])   // radial gradient: core=horizon, rim=pale sky
-                        : hsv565(fmodf(i*0.4f + fc, 360), 0.70f, 0.95f);
-    canvas->fillRect((int)x, (int)y, 2, 2, col);
+    canvas->fillRect((int)x, (int)y, 2, 2, pColor(20, i*255/1199));   // dot index (radial) -> palette offset, slow drift
   }
 }
 static void renderAtlas(int idx, uint32_t now) {
   atlasInit();
-  if (!fxBuf) { fxBuf = (uint16_t*)malloc(140*140*2); if (!fxBuf) return; }   // ~39 KB, kept after first entry (swirlBuf precedent)
+  if (!fxBuf) { fxBuf = (uint16_t*)malloc(96*96*2); if (!fxBuf) return; }   // ~18 KB (largest grid = julia 96^2), kept after first entry (swirlBuf precedent)
   switch (idx) {
     case 0: renderJulia(now);        break;   case 1: renderInterference(now); break;
     case 2: renderXormunch(now);     break;   case 3: renderGlobe(now);        break;
     case 4: renderRosewindow(now);   break;   case 5: renderPolarrose(now);    break;
     case 6: renderFermat(now);       break;
+  }
+}
+
+// ---- id 47: greetz scroller ----------------------------------------------------------------
+// A demoscene sine-wave marquee. Ported from references/greetz.html; content lives in greetz.h.
+// The panel is physically round, so pixels outside r=120 do not exist on the glass -- the rim
+// vignette the web version needed CSS for is free here, and nothing needs clipping.
+
+static char        gGreetzText[GREETZ_BUF];
+static size_t      gGreetzLen  = 0;
+static GreetzState gGreetzState;
+static int32_t     gGreetzOff  = 0;      // scroll offset in pixels
+static uint8_t     gGreetzPal  = 0;
+
+static constexpr int GREETZ_CELL = VGA_FONT_W * 2 + 2;   // 8px glyph at 2x + the VGA 9th column (the letter-spacing) doubled
+static constexpr int GREETZ_SPEED  = 4;                 // px/frame (owner: "slightly faster"); loop ~83 s
+static constexpr int GREETZ_AMP    = 24;                // px of swing (owner: "a little wavier")
+// The reference's 0.012 rad/px is a 523px wavelength -- fine on its 1728px canvas (3.3 waves
+// visible), but on a 240px panel that is under HALF a wave, which reads as a lazy drift rather
+// than a scroller. 410 gives ~1.6 waves across the glass. Raise for tighter ripples.
+static constexpr int GREETZ_X_STEP = 410;               // 8.8 fixed point: phase steps per screen px
+static constexpr int GREETZ_T_STEP = 208;               // 8.8 fixed point: 0.020 rad/px -> phase
+
+// Five CRT phosphor palettes from the reference, advancing one per completed loop.
+static const uint8_t GREETZ_PAL[5][3] = {
+  {0x33, 0xff, 0x66},   // green
+  {0xff, 0xb0, 0x00},   // amber
+  {0x33, 0xcc, 0xff},   // cyan
+  {0xff, 0x33, 0x99},   // pink
+  {0xc0, 0xc0, 0xc0},   // silver
+};
+
+static uint32_t greetzRng(uint32_t n) { return n ? (uint32_t)random(n) : 0; }
+
+static void greetzRebuild() {
+  gGreetzLen = greetzBuild(gGreetzState, gGreetzText, sizeof(gGreetzText), greetzRng);
+  gGreetzOff = 0;
+}
+
+// Parallax pixel starfield, ported from the reference. Positions are Q4 fixed point (1/16 px) so
+// the slow far-layer stars still drift smoothly without float in the loop.
+struct GreetzStar { int32_t x, y; uint8_t spd; uint8_t sz; uint8_t bright; };
+struct GreetzShot { int32_t x, y, vx, vy; uint8_t life, max; };
+
+static constexpr int GREETZ_STARS = 35;
+static constexpr int GREETZ_SHOTS = 2;
+static GreetzStar gGreetzStar[GREETZ_STARS];
+static GreetzShot gGreetzShot[GREETZ_SHOTS];
+static uint8_t    gGreetzShotN = 0;
+
+static void greetzSeedStars() {
+  for (int i = 0; i < GREETZ_STARS; i++) {
+    int depth = random(256);                       // 0 = far, 255 = near
+    gGreetzStar[i].x      = random(240) << 4;
+    gGreetzStar[i].y      = random(240) << 4;
+    gGreetzStar[i].spd    = (uint8_t)(5 + depth * 35 / 255);    // Q4: 0.3 .. 2.5 px/frame
+    gGreetzStar[i].sz     = depth < 128 ? 1 : 2;
+    gGreetzStar[i].bright = (uint8_t)(77 + depth * 140 / 255);  // 0.3 .. 0.85 of full
+  }
+  gGreetzShotN = 0;
+}
+
+static void greetzDrawStarfield() {
+  for (int i = 0; i < GREETZ_STARS; i++) {
+    GreetzStar& s = gGreetzStar[i];
+    s.x -= s.spd;                                  // drift left, matching the scroller
+    if (s.x < 0) { s.x = 239 << 4; s.y = random(240) << 4; }
+    uint16_t c = gfx->color565((210 * s.bright) >> 8, (255 * s.bright) >> 8, (225 * s.bright) >> 8);
+    canvas->fillRect(s.x >> 4, s.y >> 4, s.sz, s.sz, c);
+  }
+
+  if (gGreetzShotN < GREETZ_SHOTS && random(1000) < 12) {       // ~1.2% per frame
+    GreetzShot& p = gGreetzShot[gGreetzShotN++];
+    p.x = random(120) << 4; p.y = random(96) << 4;
+    p.vx = (5 + random(5)) << 4; p.vy = (1 + random(2)) << 4;
+    p.life = 0; p.max = 26;
+  }
+  for (int i = (int)gGreetzShotN - 1; i >= 0; i--) {
+    GreetzShot& p = gGreetzShot[i];
+    p.x += p.vx; p.y += p.vy; p.life++;
+    for (int t = 0; t < 7; t++) {                  // pixel head plus a fading trail
+      int a = (7 - t) * (p.max - p.life) * 255 / (7 * p.max);
+      if (a <= 0) continue;
+      uint16_t c = gfx->color565(a, a, a);
+      canvas->fillRect((p.x - p.vx * t) >> 4, (p.y - p.vy * t) >> 4, 2, 2, c);
+    }
+    if (p.life > p.max || (p.x >> 4) > 240 || (p.y >> 4) > 240)
+      gGreetzShot[i] = gGreetzShot[--gGreetzShotN];             // swap-remove
+  }
+}
+
+static void greetzOnEnter() {
+  static bool firstEntry = true;
+  if (firstEntry) {                       // loops/swapAt/palette persist across re-entry so the
+    greetzInit(gGreetzState, greetzRng);  // RiverDaddy egg (3-5 loops out) and the 5-phosphor
+    gGreetzPal = 0;                       // cycle stay reachable on a button-cycled unit.
+    firstEntry = false;
+  }
+  greetzSeedStars();
+  greetzRebuild();
+}
+
+static void renderGreetz(uint32_t now) {
+  (void)now;
+  const uint8_t* p = GREETZ_PAL[gGreetzPal];
+  uint16_t col = gfx->color565(p[0], p[1], p[2]);
+  greetzDrawStarfield();                  // behind the text; must run every frame, incl. the wrap frame below
+
+  int32_t total = (int32_t)gGreetzLen * GREETZ_CELL;
+  gGreetzOff += GREETZ_SPEED;
+  if (gGreetzOff >= total) {              // loop complete: reshuffle and flip phosphor.
+    gGreetzPal = (uint8_t)((gGreetzPal + 1) % 5);   // The screen holds only pad here, so both
+    greetzRebuild();                                // changes land invisibly.
+    return;
+  }
+
+  int first = gGreetzOff / GREETZ_CELL;                       // leftmost partly-visible cell
+  int last  = (gGreetzOff + 240) / GREETZ_CELL + 1;
+  if (last > (int)gGreetzLen) last = (int)gGreetzLen;
+
+  for (int i = first; i < last; i++) {
+    char ch = gGreetzText[i];
+    if (ch == ' ') continue;
+    if (ch < VGA_FONT_FIRST || ch > VGA_FONT_LAST) continue;  // belt and braces; a host test pins this
+    int x = i * GREETZ_CELL - gGreetzOff;
+    // The shifted sum goes negative for a partly-offscreen glyph now that X_STEP > T_STEP; the
+    // mask is what keeps idx a valid LUT index either way -- don't drop it chasing a cycle.
+    int idx = (((x * GREETZ_X_STEP) + (gGreetzOff * GREETZ_T_STEP)) >> 8) & 0xFF;
+    int y = 120 + (fastSin(idx) * GREETZ_AMP) / 127 - (VGA_FONT_H * 2) / 2;
+
+    const uint8_t* rows = VGA_FONT[ch - VGA_FONT_FIRST];
+    for (int r = 0; r < VGA_FONT_H; r++) {
+      uint8_t bits = rows[r];
+      if (!bits) continue;
+      for (int b = 0; b < VGA_FONT_W; b++) {
+        if (!(bits & (0x80 >> b))) continue;
+        // ponytail: fillRect clips against the canvas bounds for us, which is what keeps a
+        // partly-offscreen glyph from writing outside the framebuffer. Direct fb writes would be
+        // faster but would need that clip written by hand -- revisit only if this measures hot.
+        canvas->fillRect(x + b * 2, y + r * 2, 2, 2, col);
+      }
+    }
   }
 }
 
@@ -2551,7 +2891,7 @@ void renderEffect(int effect, uint32_t now) {
       case 9: { for (int x = 0; x < 240; x += 20) { for (int y = 0; y < 240; y += 20) { int dx=x-120, dy=y-120; int dist = sqrt(dx*dx + dy*dy); int v = fastSin(dist - now / 8) + fastSin(x / 10) + fastSin(y / 10); canvas->fillRect(x, y, 20, 20, pColor(8, (now / 10) - dist / 2 + v * 5)); } } break; }
       case 10: { for (int i = 0; i < 60; i++) { int angle = i * 4.25f; int spd = ((now + (i * 100)) % 2000) / 8; canvas->drawLine(120, 120, 120 + (fastCos(angle) * spd / 127), 120 + (fastSin(angle) * spd / 127), pColor(5, i * 10)); } break; }
 
-      case 11: { // NAME SPIRAL: owner's name streams outward along a rotating Archimedean coil
+      case 11: { // NAME SPIRAL: the configured name streams outward along a rotating Archimedean coil
         const char* nm = gConfig.name.empty() ? "hello" : gConfig.name.c_str();
         int len = gConfig.name.empty() ? 5 : (int)gConfig.name.size();
         static const char* SEPS[] = { "-~-", "~*~", ".:.", "-+-", "=~=", "<~>" };
@@ -2832,7 +3172,7 @@ void renderEffect(int effect, uint32_t now) {
         break;
       }
 
-      case 21: renderQR(); break;   // QR (id 34): static per-owner code, bitmap from config.html
+      case 21: renderQR(); break;   // QR (id 34): static per-unit code, bitmap from config.html
       case 22: renderToasters(now); break;   // FLYING TOASTERS (id 35): see renderToasters above
       case 23: renderBoids(); break;         // BOIDS (id 36): see renderBoids above
       case 24: renderGardenEels(now); break; // GARDEN EELS (id 37): see renderGardenEels above
@@ -3460,7 +3800,8 @@ void renderSensorDebug(uint32_t now) {
   const char* gname = "-";
   if (now - g_lastGestureMs < 1500) {
     TouchGesture t = (TouchGesture)g_lastGesture;
-    gname = t == TOUCH_TAP ? "tap" : t == TOUCH_SWIPE_LEFT ? "swipeL" : t == TOUCH_SWIPE_RIGHT ? "swipeR" : "-";
+    gname = t == TOUCH_TAP ? "tap" : t == TOUCH_SWIPE_LEFT ? "swipeL" : t == TOUCH_SWIPE_RIGHT ? "swipeR"
+          : t == TOUCH_SWIPE_UP ? "swipeU" : t == TOUCH_SWIPE_DOWN ? "swipeD" : "-";
   }
   DBG_LINE(lo, "tch %s  %s", touchPresent ? "ok" : "none", gname);
   #undef DBG_LINE
@@ -4040,6 +4381,159 @@ static void profTick(uint8_t id, uint32_t renderUs, uint32_t flushUs) {
   winStart = now; winPkt = pkt; rSum = fSum = rMax = fMax = n = 0;
 }
 
+// The strip is drawn over modes whose framebuffer PERSISTS between frames (the no-clear list in
+// loop()), so it would leave a scar with nothing to repaint it. Of that no-clear list, only
+// Pipes/Slideshow/GIF (true persistence) and Boids (decays rather than hard-clearing) are
+// actually exposed -- Swirl's upscale and treatcat's drawSky() both repaint every pixel every
+// frame regardless, so their no-clear entry there is a perf win, not persistence.
+// Re-entering the animation on hide is the obvious fix and is wrong for what IS exposed: it is
+// a no-op for Boids (its `seeded` static is never reset) and destructive for treatcat
+// (treatcatOnEnter clears the fortune and re-rolls the scene facing) -- moot for Swirl, which
+// repaints anyway.
+// Save and restore the band instead -- uniform, no per-renderer knowledge, no reset side
+// effects. Rows are contiguous in a 240-wide row-major framebuffer, so it is one memcpy.
+// Lives here, not by the carousel state block near the top of the file, because it needs
+// SCREEN_RES and canvas, both defined later in the file than that block.
+static const int CAR_BAND_Y = 100, CAR_BAND_H = 40;
+static const size_t CAR_BAND_BYTES = (size_t)CAR_BAND_H * SCREEN_RES * sizeof(uint16_t);
+static uint16_t* gCarBand = nullptr;
+static bool gCarBandValid = false;
+
+static inline uint16_t* carBandPtr() {
+  return canvas->getFramebuffer() + (size_t)CAR_BAND_Y * SCREEN_RES;
+}
+static void carouselBandRestore() {
+  if (gCarBand && gCarBandValid) memcpy(carBandPtr(), gCarBand, CAR_BAND_BYTES);
+  gCarBandValid = false;
+}
+static void carouselBandFree() {
+  free(gCarBand); gCarBand = nullptr; gCarBandValid = false;
+}
+
+// Draws the name strip. Saves the band first so the next frame's restore can erase it, then
+// dithers a scrim and prints the centre name plus its two neighbours.
+static void carouselOverlay() {
+  if (!gCarBand || gCarousel.n <= 0) return;
+  memcpy(gCarBand, carBandPtr(), CAR_BAND_BYTES);
+  gCarBandValid = true;
+
+  // 50% checkerboard scrim: Arduino_GFX has no alpha, and a dither reads as translucent for
+  // one extra line of code. The band (middle 40 rows of a 240 circle, dy<=20 from centre) is
+  // very nearly full-width -- worst case ~1.7px off-glass at each edge (sqrt(120^2-20^2) ~=
+  // 118.3) -- so no per-row clip is needed; those writes just land on invisible pixels.
+  uint16_t* fb = carBandPtr();
+  for (int y = 0; y < CAR_BAND_H; y++)
+    for (int x = (y & 1); x < SCREEN_RES; x += 2)
+      fb[y * SCREEN_RES + x] = BLACK;
+
+  // Wrap must be off: the default (Arduino_GFX.cpp, wrap=true) wraps a name that runs past the
+  // right edge onto the row below at x=0 -- unconditionally garbling the right neighbour every
+  // rest frame, and for a long-enough centre name landing on rows the band doesn't cover
+  // (glyph rows 128..143 vs the saved 100..139), a permanent scar on Pipes/Slideshow/GIF. Set
+  // explicitly, not left to the default: Name Spiral (main.cpp ~2725) sets it false for its rim
+  // text and never restores it, so the default here is otherwise boot-history dependent.
+  canvas->setTextWrap(false);
+
+  float p = gCarousel.pos();
+  int centre = (int)lroundf(p);
+  float frac = p - (float)centre;                 // -0.5..0.5, how far the strip has slid
+  for (int d = -1; d <= 1; d++) {
+    // n==1: both neighbours land on the centre itself -- skip them rather than draw the same name
+    // three times. n==2 is correctly left alone: both neighbours map to the SAME other item there,
+    // which is genuine circular-carousel behaviour, not a bug.
+    if (d != 0 && gCarousel.n == 1) continue;
+    int idx = (centre + d) % gCarousel.n;
+    if (idx < 0) idx += gCarousel.n;
+    const char* nm = animName(gCarousel.ids[idx]);
+    int ts = (d == 0) ? 2 : 1;
+    canvas->setTextSize(ts);
+    canvas->setTextColor(d == 0 ? WHITE : gfx->color565(110, 110, 110));
+    int w = ((int)strlen(nm) * 6 - 1) * ts;        // ink width: advance minus the trailing 1px gap
+    int cx = SCREEN_RES / 2 + (int)lroundf((d - frac) * Carousel::ITEM_W) - w / 2;
+    int cy = CAR_BAND_Y + CAR_BAND_H / 2 - 4 * ts;
+    if (cx > -w && cx < SCREEN_RES) { canvas->setCursor(cx, cy); canvas->print(nm); }
+  }
+}
+
+// Drives the model from the live touch snapshot. Drawing is separate (carouselOverlay).
+static void carouselUpdate(uint32_t now) {
+  if (gCarouselReq) {                      // swipe-up latch from the button task
+    gCarouselReq = false;
+    if (!gCarouselOpen) {
+      // MALLOC_CAP_INTERNAL, not plain malloc: this board has PSRAM and the IDF prefers it for any
+      // allocation over 4KB, which would put two 19.2KB memcpys per frame on the PSRAM bus. Same trap
+      // that cost the canvas 23fps (see CLAUDE.md).
+      if (!gCarBand) gCarBand = (uint16_t*)heap_caps_malloc(CAR_BAND_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (!gCarBand) return;               // 19.2KB unavailable: no strip, swipe left/right still works
+      uint8_t list[Carousel::MAX_N];
+      int n = carouselList(gConfig.favoritesMask, list, Carousel::MAX_N);
+      gCarousel.open(list, n, currentAnimId);
+      gCarouselOpen = true;
+      gCarouselTickMs = now;
+      gCarouselWasDown = false;
+      gCarouselApplied = currentAnimId;   // what is really on screen, which may not be in the list
+      gCarouselMoved   = false;           // opening is not a selection
+    }
+    gCarouselIdleMs = now;                 // a second swipe-up while open just resets the hide timer
+  }
+  if (!gCarouselOpen) return;
+
+  uint32_t snap = gTouchSnap;              // ONE read: down/x/y must come from the same sample
+  bool down = touchSnapDown(snap);
+  if (down) {
+    if (!gCarouselWasDown) gCarouselDownMs = now;   // rising edge: start of this continuous touch
+    gCarousel.drag(touchSnapX(snap));
+    lastInteractionTime = now;             // a long scrub must not trip the idle sleep
+  } else if (gCarouselWasDown) {
+    gCarousel.release();
+  }
+  gCarouselWasDown = down;
+
+  float dt = (float)(now - gCarouselTickMs) / 1000.0f;
+  gCarouselTickMs = now;
+  if (dt > 0.25f) dt = 0.25f;              // a serial stall or an upload must not launch the strip across the list
+  gCarousel.tick(dt);
+
+  // Dwell starts when the strip stops MOVING, not at finger-up: a firm flick coasts ~3.1s
+  // (carousel.h DECAY/V_SNAP), so stamping only while down closed the strip mid-coast and
+  // discarded the selection entirely.
+  if (down || gCarousel.moving()) gCarouselIdleMs = now;
+
+  if (gCarousel.moving()) gCarouselMoved = true;
+  uint8_t sel = gCarousel.settledId();
+  // Compare against what the carousel last applied, NOT currentAnimId, which the button, the
+  // multi-click jumps and the serial anim command also move -- a level test against it silently
+  // reverts those for as long as the strip is up. The moved latch keeps merely OPENING the strip
+  // from counting as a selection, including when the running anim is not in the list at all.
+  if (sel != 0xFF && gCarouselMoved && sel != gCarouselApplied) { gCarouselApplied = sel; g_pendingAnim = sel; }
+
+  // Both close paths below restore-then-free the band themselves rather than leaving it to the
+  // loop()-side restore-before-dispatch: that call is gated on gCarouselOpen, which this function
+  // is about to clear, so by the time loop() reaches the dispatch this frame it would see the
+  // flag already false and skip the restore -- leaving the strip's pixels sitting on top of
+  // whatever a persistent-framebuffer mode draws this frame.
+  if (now - gCarouselIdleMs >= CAROUSEL_HIDE_MS) {
+    carouselBandRestore();
+    carouselBandFree();
+    gCarouselOpen = false;
+    // Auto-cycle is suspended while the strip is up (see the cycleSec gate in loop()), so elapsed
+    // time kept accumulating underneath it. Without this, closing the strip after a deliberate
+    // scrub could hand the cycler an already-expired window and yank the selection immediately.
+    gLastCycle = now;
+  }
+  // Bound the DRAG, not the open. touchPoll() holds its state on an I2C read error without
+  // clearing gTouchSnap, so a wedged bus mid-drag leaves the finger-down bit set forever: the
+  // strip would never close, auto-cycle would stay off, and lastInteractionTime would be
+  // restamped every frame, so a battery board would never idle-sleep. A legitimate browse is
+  // many short touches, so it never reaches this; a stuck bit reaches it in 30s.
+  if (down && now - gCarouselDownMs >= CAROUSEL_STUCK_MS) {
+    carouselBandRestore();
+    carouselBandFree();
+    gCarouselOpen = false;
+    gLastCycle = now;   // same reasoning as the hide-timeout close above
+  }
+}
+
 void loop() {
   if (gPowerOffReq) powerOff();   // deferred button long-press (flag-only in the button task); never returns
   // Battery: sample every 5s (readBatteryMv is 8 ADC reads, ~free). On a state change apply the
@@ -4065,11 +4559,26 @@ void loop() {
     }
     // Slideshow renders no frame between transitions (the slide LIVES in the framebuffer), so a
     // splash would leave a 1-slide show on flushed black forever; dirty forces a re-list + redraw.
-    if (gBatt.splashDue(millis())) { batterySplash(); gSlidesDirty = true; }
+    if (gBatt.splashDue(millis())) {
+      // The splash repaints everything, so the saved band is stale -- drop the strip rather
+      // than paint 40 rows of stale pixels back over the splash.
+      if (gCarouselOpen) { carouselBandFree(); gCarouselOpen = false; }
+      batterySplash(); gSlidesDirty = true;
+    }
   }
 
   uint32_t now = millis();
   pollConfigSerial();
+#if defined(BOARD_WAVESHARE_128)
+  carouselUpdate(now);
+#endif
+  if (gGifUploading) {                        // same deal for a GIF upload (see the slide case below)
+    if (millis() - gGifRxMs > 3000) {         // host vanished mid-upload -> drop the partial tmp
+      if (gGifUp.active) gGifStore.abortTmp();
+      gGifUp.active = false; gGifUploading = false;
+    }
+    return;
+  }
   if (gSlideUploading) {                      // dedicate the loop to draining serial during an upload
     if (millis() - gSlideRxMs > 3000) {       // host vanished mid-upload -> drop the partial tmp
       if (gSlideUp.active) gSlideStore.abortTmp(gSlideUp.index);
@@ -4090,7 +4599,7 @@ void loop() {
   // its first line lands. The panel self-refreshes from GRAM, so the image simply holds. Placed
   // after drainTap: a save mid-audio-mode must not let the tap ring (~366ms) overrun.
   if (gCfgSetMs && millis() - gCfgSetMs < 250) { delay(1); return; }
-  if (imuPresent && currentAnimId != FLUID_ID && currentAnimId != YINYANG_ID && currentAnimId < DEBUG_ID) { static uint32_t t=0; if (now-t>=200) { t=now; setPanelRotation(imuRotation()); } }   // accel auto-flip (Fluid, Yin-Yang + the debug screens own orientation)
+  if (imuPresent && isPlayableId(currentAnimId) && currentAnimId != FLUID_ID && currentAnimId != YINYANG_ID) { static uint32_t t=0; if (now-t>=200) { t=now; setPanelRotation(imuRotation()); } }   // accel auto-flip (Fluid/Yin-Yang/debug own their orientation)
   if (g_pendingAnim >= 0) {
     currentAnimId = (uint8_t)g_pendingAnim;
     g_pendingAnim = -1;              // clear BEFORE onAnimEnter: it can take tens of ms (radio bring-up)
@@ -4146,7 +4655,7 @@ void loop() {
   // loop() context -- the same context g_pendingAnim defers to. Debug screens (non-playable ids)
   // are exempt so the cycler can't yank a bench session.
   uint32_t cycMs = (uint32_t)gConfig.cycleSec * 1000UL;
-  if (gConfig.cycleSec && isPlayableId(currentAnimId)) {
+  if (gConfig.cycleSec && isPlayableId(currentAnimId) && !gCarouselOpen) {
     // Fresh millis(), NOT the loop-top `now` snapshot -- same underflow trap as the sleep check
     // above: a manual pick applied this iteration sets gLastCycle to a LATER millis(), and
     // `now - gLastCycle` would wrap huge and fire the cycler in the same frame, clobbering the pick.
@@ -4180,10 +4689,15 @@ void loop() {
   if (gSbActive) ensureSbWheel();            // debug 37/38 keep their own ramps
 #endif
   uint32_t tRender = micros();
-  if (id == PIPES_ID || id == SLIDESHOW_ID || id == BOIDS_ID || id == SWIRL_ID) {
+#if defined(BOARD_WAVESHARE_128)
+  if (gCarouselOpen) carouselBandRestore();   // undo last frame's strip BEFORE the renderer runs
+#endif
+  if (id == PIPES_ID || id == SLIDESHOW_ID || id == BOIDS_ID || id == SWIRL_ID || id == TREATCAT_ID ||
+      id == GIF_ID || (id >= ATLAS_BASE && id < ANIM_COUNT)) {
     // no clear: pipes accumulate; slideshow keeps its blitted slide resident (loaded on change
     // only); boids fades its own trail (fadeFrame) instead of hard-clearing; swirl's upscale
-    // writes every pixel
+    // writes every pixel; the GIF player needs frame persistence for disposal modes; the atlas
+    // effects self-cover (blitUp writes every pixel; the draw effects fillScreen their own bg)
   } else {
     canvas->fillScreen(BLACK);
   }
@@ -4192,7 +4706,10 @@ void loop() {
   else if (id == SLIDESHOW_ID)            renderSlideshow(now);
   else if (id < EYE_COUNT + EFFECT_COUNT) renderEffect(id - EYE_COUNT, now);
   else if (id == SWIRL_ID)                renderSwirl(now);         // id 45: effect above the debug block
-  else if (id >= ATLAS_BASE && id < ANIM_COUNT) renderAtlas(id - ATLAS_BASE, now);   // ids 46..54: ported lab effects (before the AUDIO_BASE catch-all)
+  else if (id == TREATCAT_ID)             renderTreatcat(now);      // id 46: interactive treat cat
+  else if (id == GREETZ_ID)               renderGreetz(now);        // id 47: greetz scroller
+  else if (id == GIF_ID)                  renderGif(now);           // id 48: animated GIFs off LittleFS
+  else if (id >= ATLAS_BASE && id < ANIM_COUNT) renderAtlas(id - ATLAS_BASE, now);   // ids 49..55: ported lab effects (before the AUDIO_BASE catch-all)
   else if (id == DEBUG_ID)                renderSensorDebug(now);   // id 42: dev sensor screen
 #if OCELLUS_AUDIO
   else if (id == AUDIO_DEBUG_ID)          renderAudioDebug(now);    // id 43: dev ESP-NOW/audio telemetry
@@ -4203,6 +4720,9 @@ void loop() {
     case 3:  renderEcho(now);           break;      // id 41
     default: renderReactiveIris(now);   break;      // id 40
   }
+#endif
+#if defined(BOARD_WAVESHARE_128)
+  if (gCarouselOpen) carouselOverlay();
 #endif
   uint32_t tFlush = micros();
   canvas->flush();
