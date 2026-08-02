@@ -1016,10 +1016,11 @@ void multiClick() {
     // Triple again pages to the next debug screen (sensor -> audio -> waterfall -> wrap); on the
     // console the encoder does the same paging, which is the gesture you actually want there.
     g_pendingAnim = stepDebug(base, 1);
-  } else if (clicks == 4) {  // easter egg: hop into / advance the effect group (13..37, then 45, wrap)
+  } else if (clicks == 4) {  // easter egg: hop into / advance the effect group (13..37, then 45, then 46..54, wrap)
     g_pendingAnim = (base < EYE_COUNT) ? EYE_COUNT
                   : (base == EYE_COUNT + EFFECT_COUNT - 1) ? SWIRL_ID   // last low effect -> the 45+ block
-                  : (base == SWIRL_ID) ? EYE_COUNT                      // ...which wraps back to Matrix
+                  : (base == SWIRL_ID) ? ATLAS_BASE                     // Swirl -> first ported effect (46)
+                  : (base >= ATLAS_BASE) ? (base + 1 < ANIM_COUNT ? (uint8_t)(base + 1) : EYE_COUNT)   // 46..53 -> +1; 54 wraps to Matrix
                   : (uint8_t)(EYE_COUNT + ((base - EYE_COUNT + 1) % EFFECT_COUNT));   // defer apply to loop()
   }
 }
@@ -2075,21 +2076,26 @@ static void renderGardenEels(uint32_t now) {
              + sinf(f * e.waveK - T * e.waveSp + e.ph) * f * 240.0f * e.waveAmp * waviness; }
     const float w0 = 8.88f;                        // res*0.037
     auto W = [&](int s) { return w0 * (1.0f - ((float)s / N) * 0.08f); };
-    float topW = W(N); int hx = (int)ptx[N], hy = (int)pty[N];
+    float topW = W(N); float headR = topW;
+    int hx = (int)ptx[N], hy = (int)pty[N];
     bool banded = !v.spot;
-    // cap first: the quads drawn after cover its lower half with the right band colors
-    canvas->fillCircle(hx, hy, (int)topW, banded ? v.band : v.body);
-    for (int s = 0; s < N; s++) { float w1 = W(s), w2 = W(s + 1);
+    // outline BEHIND the fill: draw the whole silhouette 2px wider in outline color, then the colored
+    // fill on top. Fill half-width W is strictly < outline half-width W+ob at every cross-section (same
+    // centerline + endpoints), so color can never spill past the outline -- unlike the old per-segment
+    // geLine3 flanks, which only thickened horizontally and leaked on the wavy/tilted parts.
+    const float ob = 2.0f;
+    canvas->fillCircle(hx, hy, (int)headR + 2, oc);                        // cap outline
+    for (int s = 0; s < N; s++) { float w1 = W(s) + ob, w2 = W(s + 1) + ob;   // silhouette outline
+      geQuad((int)(ptx[s] - w1), (int)pty[s], (int)(ptx[s+1] - w2), (int)pty[s+1],
+             (int)(ptx[s+1] + w2), (int)pty[s+1], (int)(ptx[s] + w1), (int)pty[s], oc); }
+    canvas->fillCircle(hx, hy, (int)headR, banded ? v.band : v.body);      // cap fill
+    for (int s = 0; s < N; s++) { float w1 = W(s), w2 = W(s + 1);          // body fill
       bool isBand = banded && (((int)(((float)s / N) * 5) % 2) == 0);
       geQuad((int)(ptx[s] - w1), (int)pty[s], (int)(ptx[s+1] - w2), (int)pty[s+1],
              (int)(ptx[s+1] + w2), (int)pty[s+1], (int)(ptx[s] + w1), (int)pty[s], isBand ? v.band : v.body); }
     if (v.spot) for (int s = 1; s < N; s++) { if (((s * 3 + 2) % 4) < 2) {
         float off = (((s * 13) % 7) - 3) / 3.0f * W(s) * 0.6f; int rr = (int)(240 * (0.006f + ((s * 5) % 3) * 0.005f));
         canvas->fillEllipse((int)(ptx[s] + off), (int)pty[s], rr, rr, v.spotC); } }
-    for (int s = 0; s < N; s++) {                  // one thick outline down each flank + cap arc
-      geLine3((int)(ptx[s] - W(s)), (int)pty[s], (int)(ptx[s+1] - W(s+1)), (int)pty[s+1], oc);
-      geLine3((int)(ptx[s] + W(s)), (int)pty[s], (int)(ptx[s+1] + W(s+1)), (int)pty[s+1], oc); }
-    canvas->fillArc(hx, hy, (int)topW + 1, (int)topW - 2, 180, 360, oc);
     int kind = ((int)floorf(st * 0.0006f + e.mph)) % 5; if (kind < 0) kind += 5;
     if (e.gaze == 0) {                             // front-facing: blush + two sparkle eyes + expression
       float ey = hy - topW * 0.28f, ex = topW * 0.4f, er = topW * 0.32f;
@@ -2146,7 +2152,7 @@ static void renderGardenEels(uint32_t now) {
     if (moving) { c.x += dx / dist * c.sp; c.y += dy / dist * c.sp; c.face = c.back ? -(dx >= 0 ? 1 : -1) : (dx >= 0 ? 1 : -1); }
     else if (c.nextTurn > st + 120) c.nextTurn = st + 120;
     int cx = (int)c.x, cy = (int)(c.y + (moving ? sinf(st * 0.03f + c.ph) * 0.96f : 0));
-    geHome(cx, (int)(cy - S * 0.38f), S * 1.2f, c.face, c.home);
+    geHome(cx, (int)(cy - S * 0.38f), S * 1.2f, 1, c.home);   // fixed orientation: the home rides the back, does not flip when the crab reverses (was c.face -> asymmetric homes snapped side to side)
     const uint16_t legC = geC565(207, 90, 36), bodyC = geC565(242, 116, 58);
     for (int l = -2; l <= 2; l++) { float lp = moving ? sinf(st * 0.05f + l + c.ph) * S * 0.08f : 0;
       canvas->drawLine(cx + (int)(l * S * 0.13f), cy + (int)(S * 0.3f), cx + (int)(l * S * 0.13f + lp), cy + (int)(S * 0.5f), legC);
@@ -2237,6 +2243,197 @@ static void renderSwirl(uint32_t now) {
       uint32_t c = swirlLerp(vrow[mi[ox]], vrow[mi2[ox]], mw[ox]);
       out[ox] = (uint16_t)((c & 0xFFFF) | (c >> 16));
     }
+  }
+}
+
+// ===================== ATLAS: creative-coding lab effects (ids 46..49) =====================
+// Ported from creative_coding/c++/effects.js. The px-grid effects (Julia, Interference, Munching
+// Squares) write a res x res RGB565 grid into the shared fxBuf, then blitUp() bilinear-upscales it
+// into the whole 240 framebuffer -- the same pipeline as renderSwirl (reusing swirlSpread/swirlLerp).
+// Wireframe Globe is a draw() effect: it plots dots straight to the canvas. Lab palettes are baked
+// here from the SAME stop lists as lab-core.js PAL, kept as 24-bit 0xRRGGBB; to565() converts at the
+// last step. The lab clock is now*9/20 (0.45x, see swirl). ponytail: params are the lab defaults
+// baked as constants (no on-device sliders); clear stays on. Globe morph is QMI8658 tilt-driven on
+// device (in-plane gravity -> radial swell), falling back to the browser's time-based burst if no IMU.
+static inline int   acli(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static inline float aclf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
+static inline uint32_t to24(int r, int g, int b) { return ((uint32_t)(r&255)<<16)|((g&255)<<8)|(b&255); }
+static inline uint16_t to565(uint32_t c) { return geC565((c>>16)&255, (c>>8)&255, c&255); }
+static uint16_t hsv565(float h, float s, float v) {   // p5 HSB source: h 0..360, s/v 0..1
+  h = fmodf(h, 360.0f); if (h < 0) h += 360.0f;
+  float c = v*s, x = c*(1 - fabsf(fmodf(h/60.0f, 2) - 1)), m = v - c, r, g, b;
+  int seg = (int)(h/60.0f);
+  switch (seg) { case 0: r=c;g=x;b=0; break; case 1: r=x;g=c;b=0; break; case 2: r=0;g=c;b=x; break;
+                 case 3: r=0;g=x;b=c; break; case 4: r=x;g=0;b=c; break; default: r=c;g=0;b=x; break; }
+  return geC565((int)((r+m)*255), (int)((g+m)*255), (int)((b+m)*255));
+}
+
+static uint32_t PAL_plasma[256], PAL_escape[256], PAL_rainbow[256], PAL_spectrum[256], PAL_stained[256],
+                PAL_sunrise[256], PAL_sunset[256];
+static void labBake(uint32_t* pal, const uint8_t* s, int n) {   // s = n rows of {pos,r,g,b}; linear between bracketing stops (== lab makePalette)
+  for (int i = 0; i < 256; i++) {
+    int k = 0; for (; k < n-1; k++) if (i >= s[k*4] && i <= s[(k+1)*4]) break;
+    if (k > n-2) k = n-2;
+    const uint8_t* a = s + k*4; const uint8_t* b = s + (k+1)*4;
+    int span = b[0]-a[0]; if (span < 1) span = 1; int f = i - a[0];
+    pal[i] = to24(a[1]+(b[1]-a[1])*f/span, a[2]+(b[2]-a[2])*f/span, a[3]+(b[3]-a[3])*f/span);
+  }
+}
+static void atlasInit() {
+  static bool done = false; if (done) return; done = true;
+  static const uint8_t ST_plasma[]  ={0,20,10,60, 70,150,20,140, 140,235,60,80, 200,250,190,50, 255,255,245,190};
+  static const uint8_t ST_escape[]  ={0,0,0,8, 40,20,10,90, 110,10,120,160, 170,230,120,60, 220,255,220,120, 255,0,0,0};
+  static const uint8_t ST_spectrum[]={0,10,0,40, 64,0,120,220, 128,0,200,120, 192,230,200,0, 255,240,40,40};
+  static const uint8_t ST_stained[] ={0,10,4,30, 60,180,20,40, 120,20,60,200, 190,20,180,140, 255,240,220,90};
+  static const uint8_t ST_sunrise[] ={0,20,20,60, 60,120,50,120, 120,240,110,90, 180,255,170,80, 230,255,220,130, 255,255,245,200};
+  static const uint8_t ST_sunset[]  ={0,30,10,50, 55,110,25,80, 120,210,45,60, 175,255,110,40, 220,255,175,60, 255,255,225,150};
+  labBake(PAL_plasma, ST_plasma, 5); labBake(PAL_escape, ST_escape, 6); labBake(PAL_spectrum, ST_spectrum, 5); labBake(PAL_stained, ST_stained, 5);
+  labBake(PAL_sunrise, ST_sunrise, 6); labBake(PAL_sunset, ST_sunset, 6);
+  for (int i = 0; i < 256; i++) {   // rainbow: HSV sweep, matches lab-core.js PAL.rainbow
+    float h = i/256.0f*6, x = 1 - fabsf(fmodf(h,2)-1); int sx = (int)h; float r,g,b;
+    if (sx==0){r=1;g=x;b=0;} else if (sx==1){r=x;g=1;b=0;} else if (sx==2){r=0;g=1;b=x;}
+    else if (sx==3){r=0;g=x;b=1;} else if (sx==4){r=x;g=0;b=1;} else {r=1;g=0;b=x;}
+    PAL_rainbow[i] = to24((int)(r*255),(int)(g*255),(int)(b*255));
+  }
+}
+
+static uint16_t* fxBuf = nullptr;   // shared res x res grid, sized to the largest (julia 140^2)
+static void blitUp(int res, bool smooth) {   // generalizes renderSwirl's 64->240 upscale to any res<=240
+  uint16_t* fb = canvas->getFramebuffer();
+  static uint8_t mi[240], mi2[240], mw[240];
+  for (int o = 0; o < 240; o++) {
+    uint32_t s16 = (uint32_t)o * (res-1) * 16 / 239;
+    if (smooth) { mi[o] = s16>>4; mw[o] = s16 & 15; mi2[o] = mi[o]+1 < res ? mi[o]+1 : mi[o]; }
+    else { int r = (s16+8)>>4; if (r >= res) r = res-1; mi[o] = r; mw[o] = 0; mi2[o] = r; }   // nearest for smooth:false effects
+  }
+  uint32_t vrow[240];
+  for (int oy = 0; oy < 240; oy++) {
+    const uint16_t* r0 = fxBuf + mi[oy]*res; const uint16_t* r1 = fxBuf + mi2[oy]*res; uint32_t wy = mw[oy];
+    for (int i = 0; i < res; i++) vrow[i] = swirlLerp(swirlSpread(r0[i]), swirlSpread(r1[i]), wy);
+    uint16_t* out = fb + oy*240;
+    for (int ox = 0; ox < 240; ox++) {
+      uint32_t c = swirlLerp(vrow[mi[ox]], vrow[mi2[ox]], mw[ox]);
+      out[ox] = (uint16_t)((c & 0xFFFF) | (c >> 16));
+    }
+  }
+}
+
+static void renderJulia(uint32_t now) {   // res 140 -- escape-time Julia, c orbits a small circle
+  const int res = 140; uint32_t t = now*9/20; int T = (int)((t*3)>>7);
+  float cRe = fastSin(T)*0.006f, cIm = fastCos(T)*0.006f;
+  const float hw = 1.5f, ctr = res/2.0f;   // centered on the grid, sized to fill the round panel
+  for (int y = 0; y < res; y++) for (int x = 0; x < res; x++) {
+    float zr = (x-ctr)/ctr*hw, zi = (y-ctr)/ctr*hw, m2 = 0; int i = 0;
+    while (i < 40) { float nr = zr*zr-zi*zi+cRe, ni = 2*zr*zi+cIm; zr = nr; zi = ni; m2 = zr*zr+zi*zi; if (m2 > 64) break; i++; }
+    uint16_t col;
+    if (i >= 40) col = to565(PAL_escape[255]);
+    else { float mu = i + 1 - logf(logf(sqrtf(m2)))/0.6931472f; col = to565(PAL_escape[acli((int)(mu/40*255),0,255)]); }
+    fxBuf[y*res+x] = col;
+  }
+  blitUp(res, true);
+}
+static void renderInterference(uint32_t now) {
+  const int res = 64; uint32_t t = now*9/20; int T = (int)((t*3)>>4); const int k = 6, n = 2;
+  static const int SRC[4][2] = {{16,16},{48,48},{48,16},{16,48}};
+  for (int y = 0; y < res; y++) for (int x = 0; x < res; x++) {
+    int v = 0; for (int i = 0; i < n; i++) { int dx = x-SRC[i][0], dy = y-SRC[i][1]; int dist = (int)(sqrtf((float)(dx*dx+dy*dy))*2); v += fastSin(dist*k-T); }
+    fxBuf[y*res+x] = to565(PAL_plasma[acli((v+n*127)*255/(n*254),0,255)]);
+  }
+  blitUp(res, true);
+}
+static void renderXormunch(uint32_t now) {
+  const int res = 64; uint32_t t = now*9/20; const int mask = 4; int tt = (int)(t>>4);
+  for (int y = 0; y < res; y++) for (int x = 0; x < res; x++) {
+    int v = ((x^y)+tt) & 255; fxBuf[y*res+x] = to565(PAL_rainbow[(v+(mask<<5))&255]);
+  }
+  blitUp(res, false);
+}
+static void renderGlobe(uint32_t now) {   // dotted lat/lon sphere spinning about Y, time-based morph burst
+  atlasInit();
+  float t = now*0.45f;
+  canvas->fillScreen(geC565(2,4,8));
+  const float cx = 120, cy = 120, R = 240*0.41f;
+  const int nLat = 16, nLon = 32;
+  float rotY = t*0.0005f*3, cosR = cosf(rotY), sinR = sinf(rotY);
+  // morph amplitude: tilt-driven on device (QMI8658 in-plane gravity), time-based burst as fallback
+  float morphAmt;
+  static float gTiltSmooth = 0;
+  int16_t ax, ay, az;
+  if (imuPresent && imuReadAccel(&ax, &ay, &az)) {
+    float rawMag = aclf(sqrtf((float)ax*ax + (float)ay*ay)/8192.0f, 0.0f, 1.0f);   // 8192 counts/g (ACCEL_COUNTS_PER_G): 0 flat .. 1 on edge
+    gTiltSmooth += (rawMag - gTiltSmooth)*0.06f;   // low-pass into a smooth waveform
+    morphAmt = gTiltSmooth*0.4f;                   // map 0..1 tilt to a 0..0.4 radial swell
+  } else {
+    float mb = sinf(t*0.00013f); if (mb < 0) mb = 0; morphAmt = mb*mb*mb;   // 0 most of the time, swells in bursts
+  }
+  float wobT = t*0.001f;
+  for (int la = 0; la <= nLat; la++) {
+    float phi = (float)la/nLat*3.14159265f, sinP = sinf(phi), cosP = cosf(phi);
+    uint32_t c = PAL_spectrum[(int)((float)la/nLat*255)];
+    int cr = (c>>16)&255, cg = (c>>8)&255, cb = c&255;
+    for (int lo = 0; lo < nLon; lo++) {
+      float theta = (float)lo/nLon*6.2832f;
+      float x0 = cosf(theta)*sinP, y0 = cosP, z0 = sinf(theta)*sinP;
+      float xr = x0*cosR + z0*sinR, zr = -x0*sinR + z0*cosR, yr = y0;
+      float Rp = R*(1 + morphAmt*0.38f*sinf(3*phi + 2*theta + wobT));
+      int sx = (int)(cx + xr*Rp), sy = (int)(cy - yr*Rp);
+      float alpha = zr < 0 ? 0.30f + 0.30f*(1+zr) : 0.55f + 0.45f*zr;   // far side dims (no real alpha: scale color toward the dark bg)
+      canvas->fillRect(sx, sy, 3, 3, geC565((int)(cr*alpha),(int)(cg*alpha),(int)(cb*alpha)));
+    }
+  }
+}
+static void renderRosewindow(uint32_t now) {   // radial mirror-fold stained-glass mandala
+  const int res = 64; uint32_t t = now*9/20; const int seg = 8; int T = (int)((t*3)>>5); float wedge = 6.2832f/seg;
+  for (int y = 0; y < res; y++) for (int x = 0; x < res; x++) {
+    float dx = x-32, dy = y-32, r = sqrtf(dx*dx+dy*dy);
+    float ang = atan2f(dy,dx); ang = fmodf(fmodf(ang,wedge)+wedge,wedge); if (ang > wedge/2) ang = wedge-ang;
+    int ai = (int)(ang*(256.0f/wedge)), ri = (int)(r*3);
+    int breath = 128 + (fastSin(T+(int)(r*2))>>1);
+    int v = ((fastSin(ri*4+T)+fastSin(ai*3-T)+breath+384)>>2) & 255;
+    fxBuf[y*res+x] = to565(PAL_stained[v]);
+  }
+  blitUp(res, true);
+}
+static void renderPolarrose(uint32_t now) {   // layered rose curve r = cos(k*theta), k morphs, hue cycles per layer (p5-atlas polar-rose)
+  atlasInit();
+  float fc = now*0.06f;                          // ~60fps-equivalent frame counter (source uses frameCount)
+  canvas->fillScreen(hsv565(320, 0.40f, 0.08f)); // dark magenta bg
+  const float cx = 120, cy = 120, R = 240*0.42f;
+  float k = 2 + sinf(fc*0.005f)*5;               // petal count morphs
+  for (int L = 0; L < 6; L++) {
+    uint16_t col = hsv565(fmodf(fc + L*30, 360), 0.75f, 0.90f);
+    float scale = R*(1 - L*0.13f), px = 0, py = 0; bool first = true;
+    for (float a = 0; a < 6.2832f*2; a += 0.02f) {
+      float r = cosf(k*a)*scale, x = cx + cosf(a)*r, y = cy + sinf(a)*r;
+      if (!first) canvas->drawLine((int)px, (int)py, (int)x, (int)y, col);
+      px = x; py = y; first = false;
+    }
+  }
+}
+static void renderFermat(uint32_t now) {   // Fermat spiral of golden-angle dots, each wobbling (p5-atlas emergent-spiral)
+  atlasInit();
+  float fc = now*0.06f, t = fc*0.01f;
+  int mode = (int)((now/12000) % 3);   // 0 = rainbow (HSB), 1 = sunrise gradient, 2 = sunset gradient; swaps ~every 12s
+  const uint32_t* grad = mode == 1 ? PAL_sunrise : mode == 2 ? PAL_sunset : nullptr;
+  if (grad) { uint32_t d = grad[0]; canvas->fillScreen(geC565(((d>>16)&255)>>2, ((d>>8)&255)>>2, (d&255)>>2)); }   // bg = dim horizon
+  else canvas->fillScreen(hsv565(270, 0.50f, 0.06f));
+  const float cx = 120, cy = 120, c = 240*0.012f;
+  for (int i = 0; i < 1200; i++) {
+    float a = i*2.39996f + t*0.1f, r = c*sqrtf((float)i), wob = sinf(t + i*0.05f)*4;
+    float x = cx + cosf(a)*(r+wob), y = cy + sinf(a)*(r+wob);
+    uint16_t col = grad ? to565(grad[i*255/1199])   // radial gradient: core=horizon, rim=pale sky
+                        : hsv565(fmodf(i*0.4f + fc, 360), 0.70f, 0.95f);
+    canvas->fillRect((int)x, (int)y, 2, 2, col);
+  }
+}
+static void renderAtlas(int idx, uint32_t now) {
+  atlasInit();
+  if (!fxBuf) { fxBuf = (uint16_t*)malloc(140*140*2); if (!fxBuf) return; }   // ~39 KB, kept after first entry (swirlBuf precedent)
+  switch (idx) {
+    case 0: renderJulia(now);        break;   case 1: renderInterference(now); break;
+    case 2: renderXormunch(now);     break;   case 3: renderGlobe(now);        break;
+    case 4: renderRosewindow(now);   break;   case 5: renderPolarrose(now);    break;
+    case 6: renderFermat(now);       break;
   }
 }
 
@@ -3995,6 +4192,7 @@ void loop() {
   else if (id == SLIDESHOW_ID)            renderSlideshow(now);
   else if (id < EYE_COUNT + EFFECT_COUNT) renderEffect(id - EYE_COUNT, now);
   else if (id == SWIRL_ID)                renderSwirl(now);         // id 45: effect above the debug block
+  else if (id >= ATLAS_BASE && id < ANIM_COUNT) renderAtlas(id - ATLAS_BASE, now);   // ids 46..54: ported lab effects (before the AUDIO_BASE catch-all)
   else if (id == DEBUG_ID)                renderSensorDebug(now);   // id 42: dev sensor screen
 #if OCELLUS_AUDIO
   else if (id == AUDIO_DEBUG_ID)          renderAudioDebug(now);    // id 43: dev ESP-NOW/audio telemetry
