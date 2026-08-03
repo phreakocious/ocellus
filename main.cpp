@@ -1706,6 +1706,14 @@ void setup() {
   touchBegin();  // CST816S gestures (Waveshare board); no-op / touchPresent=false elsewhere
   encoderBegin();  // EC11 quadrature ISRs (S3-Zero); no-op elsewhere
 
+  // Seed the panel rotation from gravity before anything is drawn. applyConfig() deliberately skips
+  // rotation when an IMU is present (the IMU owns it), but the auto-flip only runs from loop() --
+  // so setup()'s boot splash used to render at rotation 0 no matter how the unit was being held, and
+  // powering on upside down gave an upside-down name reveal for the splash's whole ~9.3s. imuBegin()
+  // has already waited for reset-done and flushed the invalid startup samples, so this reads clean.
+  // Placed before the button task starts so it cannot race touchPoll() on the shared I2C bus.
+  if (imuPresent) setPanelRotation(imuRotation());
+
   button.setClickMs(600); button.setDebounceMs(80);
   button.attachClick(singleClick); button.attachDoubleClick(doubleClick);
   button.attachMultiClick(multiClick); button.attachLongPressStart(powerOffRequest);
@@ -1729,7 +1737,8 @@ void setup() {
 
   uint32_t readyAt = millis();
   lastInteractionTime = readyAt; pauseStartTime = readyAt; stateEndTime = readyAt + 500; nextFrameTime = readyAt;
-  Serial.printf("[boot] cpu %lu MHz\n", (unsigned long)getCpuFrequencyMhz());
+  Serial.printf("[boot] cpu %lu MHz rot=%u imu=%d\n", (unsigned long)getCpuFrequencyMhz(),
+                (unsigned)gAppliedRot, (int)imuPresent);   // rot is the gravity seed the splash drew at
 }
 
 // DOOM corridor tube, drawn with a vertical pixel offset (yOff) so the trap-door drop can pan between
