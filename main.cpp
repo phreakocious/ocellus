@@ -148,6 +148,7 @@ static void clipHoldClear() { gClipHoldReq = false; gClipHold = false; gClipPipO
 // Bottom-centre. The round bezel eats the corners: at y=196 the panel's half-width is
 // sqrt(120*120 - 76*76) ~= 93 px, so x 100..140 is comfortably inside the glass.
 static const int PIP_X = 100, PIP_Y = 196, PIP_W = 40, PIP_H = 20;
+static const uint32_t PIP_MS = 800;             // how long the pip stays up after a hold/resume
 static uint16_t gClipPipUnder[PIP_W * PIP_H];   // 1600 B in BSS -- no malloc, so no failure path
 // clipPipSave/clipPipRestore/clipPipDraw (Task 2) live just above loop(), not here: they touch
 // `canvas` and `currentAnimId`, both declared later in the file (lines ~338, ~375).
@@ -4666,13 +4667,13 @@ static void carouselUpdate(uint32_t now) {
 // is never reliably painted over -- but a single underlay saved 25 frames earlier would restore
 // stale artwork over anything that animated beneath it. Per-frame keeps the canvas clean always.
 static void clipPipSave() {
-  uint16_t* fb = (uint16_t*)canvas->getFramebuffer();
+  uint16_t* fb = canvas->getFramebuffer();
   for (int r = 0; r < PIP_H; r++)
     memcpy(&gClipPipUnder[r * PIP_W], fb + (size_t)(PIP_Y + r) * 240 + PIP_X, PIP_W * 2);
 }
 
 static void clipPipRestore() {
-  uint16_t* fb = (uint16_t*)canvas->getFramebuffer();
+  uint16_t* fb = canvas->getFramebuffer();
   for (int r = 0; r < PIP_H; r++)
     memcpy(fb + (size_t)(PIP_Y + r) * 240 + PIP_X, &gClipPipUnder[r * PIP_W], PIP_W * 2);
 }
@@ -4681,7 +4682,7 @@ static void clipPipRestore() {
 static bool clipPipDraw() {
   if (!gClipPipOn) return false;
   if (currentAnimId != GIF_ID && currentAnimId != SLIDESHOW_ID) { gClipPipOn = false; return false; }
-  if (millis() - gClipPipStart >= 800) { gClipPipOn = false; return false; }   // elapsed, not deadline
+  if (millis() - gClipPipStart >= PIP_MS) { gClipPipOn = false; return false; }   // elapsed, not deadline
   clipPipSave();
   canvas->fillRect(PIP_X, PIP_Y, PIP_W, PIP_H, 0x18E3);          // dim slate backing so it reads over any art
   const uint16_t fg = 0xFFFF;
@@ -4746,9 +4747,16 @@ void loop() {
     // Restamp all three dwell timers either way. On hold it is harmless (the gates are off); on
     // resume it is what turns an instant jump from an elapsed timer into a full fresh dwell, and
     // stops the auto-cycler firing the moment you let go. Unconditional beats two branches.
-    uint32_t t = millis();
-    gGifClipStartMs = t; gSlideShownMs = t; gLastCycle = t;
-    gClipPipOn = true; gClipPipStart = t;         // Task 2 draws it; harmless until then
+    // The loop-top `now` snapshot, NOT a fresh millis(): pollConfigSerial()/carouselUpdate() run
+    // between that snapshot and here, so a fresh millis() here can be > now. renderSlideshow/
+    // renderGif are called with `now` later this same iteration and diff it against these fields
+    // (`now - gSlideShownMs`, `now - gGifClipStartMs`) -- if the stamp were > now that subtraction
+    // underflows to ~4.29e9, which is >= any holdMs, so the resume swipe would instantly fade out
+    // and advance instead of restarting the dwell. Same underflow trap as the sleep check and the
+    // auto-cycle block below, just facing the other direction (stamp must not be AHEAD of the
+    // value it will be diffed against, here, instead of behind it).
+    gGifClipStartMs = now; gSlideShownMs = now; gLastCycle = now;
+    gClipPipOn = true; gClipPipStart = now;       // Task 2 draws it; harmless until then
   }
   if (gGifUploading) {                        // same deal for a GIF upload (see the slide case below)
     if (millis() - gGifRxMs > 3000) {         // host vanished mid-upload -> drop the partial tmp
