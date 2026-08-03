@@ -135,20 +135,35 @@ void test_small_buffer_truncates_safely() {
 
 void test_font_covers_printable_ascii() {
   TEST_ASSERT_EQUAL_UINT8(32,  VGA_FONT_FIRST);
-  TEST_ASSERT_EQUAL_UINT8(126, VGA_FONT_LAST);
-  TEST_ASSERT_EQUAL_INT(95, VGA_FONT_LAST - VGA_FONT_FIRST + 1);
+  TEST_ASSERT_EQUAL_UINT8(255, VGA_FONT_LAST);
+  TEST_ASSERT_EQUAL_INT(224, VGA_FONT_LAST - VGA_FONT_FIRST + 1);
   TEST_ASSERT_EQUAL_INT(8,  VGA_FONT_W);
   TEST_ASSERT_EQUAL_INT(16, VGA_FONT_H);
 }
 
-// Space is the only glyph that may be entirely blank. A blank anything else means the
+// 0xC9 is CP437 double-corner. Baked through the Unicode cmap without a CP437 map it
+// would be 'E-acute' instead: an accent mark means ink in the TOP rows, and a corner
+// means the top rows are empty. That difference is the whole test.
+void test_cp437_box_corner_not_latin1() {
+  const uint8_t* g = VGA_FONT[0xC9 - VGA_FONT_FIRST];
+  uint8_t topInk = 0;
+  for (int r = 0; r < 4; r++) topInk |= g[r];
+  TEST_ASSERT_EQUAL_UINT8(0, topInk);            // no accent above the box
+  uint8_t bodyInk = 0;
+  for (int r = 7; r < 12; r++) bodyInk |= g[r];
+  TEST_ASSERT_NOT_EQUAL(0, bodyInk);             // the corner itself has ink
+}
+
+// Space and CP437 0xFF are the only glyphs that may be entirely blank. 0xFF is CP437's
+// no-break space (decodes to U+00A0), which this font renders identically to a space --
+// a real property of the codepage, not a rasterizer miss. A blank anything else means the
 // rasterizer silently missed it and that character would scroll past as a hole.
 void test_only_space_is_blank() {
   for (int c = VGA_FONT_FIRST; c <= VGA_FONT_LAST; c++) {
     int ink = 0;
     for (int r = 0; r < VGA_FONT_H; r++) ink |= VGA_FONT[c - VGA_FONT_FIRST][r];
-    if (c == ' ') TEST_ASSERT_EQUAL_INT_MESSAGE(0, ink, "space should be blank");
-    else          TEST_ASSERT_NOT_EQUAL_MESSAGE(0, ink, "non-space glyph is blank");
+    if (c == ' ' || c == 0xFF) TEST_ASSERT_EQUAL_INT_MESSAGE(0, ink, "expected-blank glyph is inked");
+    else                       TEST_ASSERT_NOT_EQUAL_MESSAGE(0, ink, "non-space glyph is blank");
   }
 }
 
@@ -215,6 +230,7 @@ int main(int, char**) {
   RUN_TEST(test_all_content_chars_are_printable_ascii);
   RUN_TEST(test_small_buffer_truncates_safely);
   RUN_TEST(test_font_covers_printable_ascii);
+  RUN_TEST(test_cp437_box_corner_not_latin1);
   RUN_TEST(test_only_space_is_blank);
   RUN_TEST(test_bit_order_is_msb_first);
   RUN_TEST(test_descenders_reach_the_lower_rows);
