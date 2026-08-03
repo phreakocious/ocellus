@@ -136,6 +136,7 @@ static int      gGifLoops = 0;           // completed loops of the current clip
 // gClipHoldReq is the ONLY field the button task touches, matching gCarouselReq/g_pendingAnim.
 // Everything else here is written from loop() only, so it needs no volatile.
 static volatile bool gClipHoldReq = false;   // swipe-down mailbox; drained in loop()
+static volatile bool gClipNextReq = false;   // tap-to-advance mailbox; drained in loop()
 static bool     gClipHold     = false;       // session-only; never persisted (see spec)
 static bool     gClipPipOn    = false;       // pip is live this frame (Task 2)
 static uint32_t gClipPipStart = 0;           // elapsed-compared, never a bare deadline
@@ -143,7 +144,8 @@ static uint32_t gClipPipStart = 0;           // elapsed-compared, never a bare d
 // Every path that invalidates "the current clip" clears the hold: mode change, and any list
 // rebuild (upload, bad file, battery splash). A hold surviving a rebuild would pin an arbitrary
 // index, and a hold surviving a mode change would suppress the GLOBAL auto-cycler forever.
-static void clipHoldClear() { gClipHoldReq = false; gClipHold = false; gClipPipOn = false; }
+// gClipNextReq goes too: a tap queued against the old list would step the wrong clip.
+static void clipHoldClear() { gClipHoldReq = false; gClipNextReq = false; gClipHold = false; gClipPipOn = false; }
 
 // Bottom-centre. The round bezel eats the corners: at y=196 the panel's half-width is
 // sqrt(120*120 - 76*76) ~= 93 px, so x 100..140 is comfortably inside the glass.
@@ -995,6 +997,7 @@ void buttonReadTask(void *pvParameters) {
           tx = tx < 0 ? 0 : (tx > 239 ? 239 : tx); ty = ty < 0 ? 0 : (ty > 239 ? 239 : ty);
           gTreatTap = (1u << 31) | ((uint32_t)tx << 12) | (uint32_t)ty;
         } else if (currentAnimId < EYE_COUNT) { isJittering = true; jitterEndTime = millis() + 500; }
+        else if (currentAnimId == GIF_ID || currentAnimId == SLIDESHOW_ID) gClipNextReq = true;  // flag-only; loop() advances
         break;
       case TOUCH_SWIPE_DOWN:
         // Mode-scoped: only these two modes claim swipe-down, so the gesture stays free for the
@@ -4757,6 +4760,23 @@ void loop() {
     // value it will be diffed against, here, instead of behind it).
     gGifClipStartMs = now; gSlideShownMs = now; gLastCycle = now;
     gClipPipOn = true; gClipPipStart = now;       // Task 2 draws it; harmless until then
+  }
+  // Tap steps forward one clip/slide. Deliberately does NOT touch gClipHold: hold + tap is manual
+  // browse, which is the whole point of pairing them. The auto-advance gates all test !gClipHold;
+  // this path bypasses them because it IS the explicit request, not the timer.
+  if (gClipNextReq) {
+    gClipNextReq = false;
+    if (currentAnimId == GIF_ID && gGifCount > 1) {
+      gGifIdx = (gGifIdx + 1) % gGifCount;
+      if (!gifOpenClip(gGifIdx)) gGifsDirty = true;      // bad file -> re-list next frame
+      // gifOpenClip stamps gGifClipStartMs from millis(), which can be AHEAD of the loop-top `now`
+      // that renderGif diffs it against later THIS iteration -> underflow to ~4.29e9 -> instant
+      // re-advance. Same trap as the hold restamp above; overwrite with `now`.
+      gGifClipStartMs = now;
+    } else if (currentAnimId == SLIDESHOW_ID && gSlideCount > 1 && gSlidePhase == 0) {
+      gSlidePhase = 1; gSlideStep = SLIDE_FADE_STEPS;    // reuse the auto crossfade exactly
+    }                                                    // mid-fade taps ignored: already advancing
+    gLastCycle = now;   // don't yank an actively-tapping user off to another animation
   }
   if (gGifUploading) {                        // same deal for a GIF upload (see the slide case below)
     if (millis() - gGifRxMs > 3000) {         // host vanished mid-upload -> drop the partial tmp
