@@ -10,7 +10,7 @@ struct Palette {
 
 struct Config {
   std::string name = "ocellus";
-  uint8_t  brightness = 50;
+  uint8_t  brightness = 40;
   uint8_t  sleepMin = 15;
   uint8_t  maxFps = 30;                 // frame cap for non-audio modes; audio modes run uncapped
   bool     flip = false;                // rotate display 180 deg (upside-down enclosure mount)

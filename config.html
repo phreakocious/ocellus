@@ -93,7 +93,9 @@
   <div class="row"><input type="file" id="gifFiles" accept="image/gif" multiple> <jelly-button id="gifUpload" size="sm" type="button" disabled>Upload</jelly-button> <jelly-button id="gifClear" size="sm" type="button" disabled>Clear all</jelly-button></div>
   <div id="gifList" class="note"></div>
   <div id="gifProg" class="note"></div>
-  <div class="row"><label>Cat variant <jelly-select id="catVariant" label="Cat variant"><jelly-option value="0">Cat 1</jelly-option><jelly-option value="1">Cat 2</jelly-option><jelly-option value="2">Cat 3</jelly-option><jelly-option value="3">Cat 4</jelly-option><jelly-option value="4">Cat 5</jelly-option><jelly-option value="5">Cat 6</jelly-option></jelly-select></label></div>
+<!-- Cat variant picker removed: CAT_PRESET[] holds ONE preset, so treatcat.cpp clamps 1..5 to 0 and
+     all six options rendered the same cat. The config field stays in the firmware (config.h
+     catVariant, still clamped + tested) — put the picker back when Task 6 lands the other five. -->
 
   <h2>QR code <span class="note">(the QR effect shows this; encoded here in-browser, the device only blits)</span></h2>
   <div class="row"><label>URL / text <jelly-input id="qrText" label="URL / text" placeholder="https://nullphase.net/oc/"></jelly-input></label></div>
@@ -5846,7 +5848,7 @@ function fillForm(c) {
   $("bootSplash").checked = !!(c.nameStyle && c.nameStyle.bootSplash);
   $("splashStyle").value = (c.nameStyle && c.nameStyle.splashStyle) || "matrix";
   $("matrixRain").checked = !!(c.nameStyle && c.nameStyle.matrixRain);
-  $("brightness").value = c.brightness ?? 20; $("brightnessVal").textContent = $("brightness").value;
+  $("brightness").value = c.brightness ?? 40; $("brightnessVal").textContent = $("brightness").value;  // match config.h's default
   $("sleepMin").value = c.sleepMin ?? 15;
   $("maxFps").value = c.maxFps ?? 30;
   $("flip").checked = !!c.flip;
@@ -5857,7 +5859,6 @@ function fillForm(c) {
   $("sbPalette").checked = c.sbPalette === true;
   $("slideshowSec").value = c.slideshowSec ?? 5;
   $("gifSec").value = c.gifSec ?? 6;
-  $("catVariant").value = c.catVariant ?? 0;
   $("qrText").value = c.qrText || ""; qrRefresh();
   $("startupMode").value = (c.startup && c.startup.mode) || "resume";
   $("startupId").value = (c.startup && c.startup.id) || 0;
@@ -5905,7 +5906,6 @@ function readForm() {
     sbPalette: $("sbPalette").checked,
     slideshowSec: +$("slideshowSec").value,
     gifSec: +$("gifSec").value,
-    catVariant: +$("catVariant").value,
     startup: { mode: $("startupMode").value, id: +$("startupId").value },
     nameStyle: { bootSplash: $("bootSplash").checked, splashStyle: $("splashStyle").value, matrixRain: $("matrixRain").checked },
     favorites,
@@ -6156,8 +6156,25 @@ $("connect").onclick = async () => {
       if (++tries > 12) { clearInterval(catalogTimer); catalogTimer = null; log("No response — replug the device and reconnect."); return; }
       send({ cmd: "catalog" });
     }, 600);
-  } catch (e) { console.error("connect error:", e); await teardown(); log("Connect failed: " + e.message); }
+  } catch (e) {
+    console.error("connect error:", e);
+    await teardown();
+    log("Connect failed: " + e.message + driverHint(e));
+  }
 };
+
+// ponytail: a browser CANNOT see whether the CH34x/CH343 driver is installed — there is no API for
+// enumerating drivers, and Web Serial only ever shows ports the OS already turned into a tty. So a
+// missing driver and a cancelled picker are the SAME observable: requestPort() rejects NotFoundError.
+// Hence a hint, not a diagnosis, and only where it's plausible. macOS 10.15+ ships AppleUSBCHCOM, so
+// this mostly bites older systems or ones where WCH's kext lost its approval in System Settings.
+function driverHint(e) {
+  const mac = /Mac|Darwin/i.test(navigator.userAgentData?.platform || navigator.platform || "");
+  if (!mac || e?.name !== "NotFoundError") return "";
+  return "\nIf the board is plugged in but never appeared in the list, macOS may not have bound the "
+       + "CH343 serial driver. Check System Settings > Privacy & Security for a blocked WCH driver, "
+       + "or try a different USB port/cable (a charge-only cable enumerates nothing).";
+}
 
 $("disconnect").onclick = teardown;
 $("load").onclick = requestConfig;
