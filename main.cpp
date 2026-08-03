@@ -2664,11 +2664,33 @@ static void renderPolarrose(uint32_t now) {   // layered rose curve r = cos(k*th
   canvas->fillScreen(hsv565(320, 0.40f, 0.08f)); // dark magenta bg
   const float cx = 120, cy = 120, R = 240*0.42f;
   float k = 2 + sinf(fc*0.005f)*5;               // petal count morphs
+  // The old sweep ran a from 0, and cos(k*0) == 1 for EVERY k -- so the curve was permanently
+  // pinned to the rightmost point while the rest of the figure morphed past it, and because k is
+  // continuous the sweep never closed, leaving that pinned end dangling as a half petal.
+  // Fix: start and end on r == 0 crossings (spaced PI/k apart in a), which puts both open ends at
+  // the centre where nothing shows. n tracks k so the swept span stays ~4*PI and the per-frame
+  // line count doesn't blow up at small k. kk guards the k -> 0 pass (r = cos(0*a) is a circle,
+  // but PI/(2k) would divide by zero on the way through).
+  // floor, not round: n*PI/kk must never exceed the old fixed 4*PI sweep. drawLine cost tracks
+  // segment LENGTH, so a longer span costs more ink no matter how few samples it is cut into --
+  // capping the sample count instead measured as noise. Measured render on the ship board over a
+  // full k cycle: original 15.50-21.69ms, round (span to 15.05) 16.46-22.64ms, floor (span to
+  // 4*PI) 15.60-21.64ms. floor is at parity with the original. All three held min 28 fps -- the
+  // 28 fps floor is inherent to the effect (long chords at low k), not something this changed.
+  float kk = fabsf(k); if (kk < 0.5f) kk = 0.5f;
+  int   n  = (int)floorf(4*kk); if (n < 1) n = 1;       // whole half-periods
+  float a0 = 1.5708f/kk, span = n*3.14159f/kk;
+  float rot = fc*0.0008f;                        // whole-figure spin, ~131 s/turn ("very slowly")
   for (int L = 0; L < 6; L++) {
     uint16_t col = hsv565(fmodf(fc + L*30, 360), 0.75f, 0.90f);
     float scale = R*(1 - L*0.13f), px = 0, py = 0; bool first = true;
-    for (float a = 0; a < 6.2832f*2; a += 0.02f) {
-      float r = cosf(k*a)*scale, x = cx + cosf(a)*r, y = cy + sinf(a)*r;
+    // Step the span in N equal parts rather than by a fixed 0.02: a stepped loop stops up to one
+    // step short, and at k = 7 that leaves the far end ~14 px out from the centre -- a visible stub,
+    // which is the whole artifact we are removing. Dividing exactly lands the last sample on r == 0.
+    int N = (int)(span/0.02f) + 1; float step = span/N;
+    for (int i = 0; i <= N; i++) {
+      float a = a0 + i*step;
+      float r = cosf(kk*a)*scale, t = a + rot, x = cx + cosf(t)*r, y = cy + sinf(t)*r;
       if (!first) canvas->drawLine((int)px, (int)py, (int)x, (int)y, col);
       px = x; py = y; first = false;
     }
