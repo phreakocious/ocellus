@@ -84,16 +84,31 @@ def _reply(s, obj):
     return None
 
 
-def get_config(port):
+def get_config(port, wait=3.0):
     """The unit's config dict, or None if this port isn't an ocellus (BUSY if it's held open --
-    almost always a config.html Web Serial tab, which is a very different thing from silence)."""
+    almost always a config.html Web Serial tab, which is a very different thing from silence).
+
+    `wait` has to clear the boot splash. pollConfigSerial() only runs once loop() does, and setup()
+    does not return until the ~9.3s splash finishes, so a unit that was reset recently -- most often
+    by the esptool hard-reset at the end of a flash -- is deaf to the config protocol for that whole
+    window, and a single get sent 3s in reads as silence from a perfectly healthy board. Retrying
+    beats one long read: an already-running board still answers on the first attempt.
+
+    Measured, because the old note here claimed otherwise: opening this port does NOT reset the
+    board. A plain pyserial open on a running unit leaves it running (uninterrupted [prof] lines,
+    no boot banner). Only a DTR/RTS transition does, which is why esptool's reset works."""
     try:
         s = _open(port)
     except Exception:
         return BUSY    # held by a Web Serial tab / another probe, or vanished
     try:
-        d = _reply(s, {"cmd": "get"})
-        return d if isinstance(d, dict) and "brightness" in d and "maxFps" in d else None
+        deadline = time.time() + wait
+        while True:
+            d = _reply(s, {"cmd": "get"})      # _reply listens ~3s per attempt
+            if isinstance(d, dict) and "brightness" in d and "maxFps" in d:
+                return d
+            if time.time() >= deadline:
+                return None
     finally:
         s.close()
 
@@ -120,7 +135,7 @@ def list_boards(do_probe):
             continue          # not one of ours
         name = "-"
         if do_probe:
-            cfg = get_config(p.device)
+            cfg = get_config(p.device, wait=15.0)   # must outlast a cold boot's splash; see get_config
             name = ("(busy -- close the config.html tab)" if cfg is BUSY else
                     "(not an ocellus)" if cfg is None else cfg.get("name") or "(unnamed)")
         rows.append((p.device, "%04X:%04X" % (p.vid, p.pid), kind,
@@ -183,7 +198,8 @@ def main():
     ap.add_argument("--list", action="store_true",
                     help="list attached boards (USB descriptor only, nothing is opened or reset) and exit")
     ap.add_argument("--probe", action="store_true",
-                    help="with --list, also ask each unit its configured name (~3s/port; reboots ship boards)")
+                    help="with --list, also ask each unit its configured name -- slow (a silent port "
+                         "costs ~15s, because a rebooted unit is deaf until its boot splash ends)")
     args = ap.parse_args()
 
     if args.list:
