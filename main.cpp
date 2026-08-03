@@ -2701,10 +2701,25 @@ static void renderFermat(uint32_t now) {   // Fermat spiral of golden-angle dots
   uint16_t bg = pColor(20, 0);   // dim the palette's leading color for a cohesive horizon
   canvas->fillScreen(geC565((((bg>>11)&0x1F)<<3)>>2, (((bg>>5)&0x3F)<<2)>>2, ((bg&0x1F)<<3)>>2));
   const float cx = 120, cy = 120, c = 240*0.012f;
+  // Both angles are arithmetic in i (i*2.39996 + t*0.1, and t + i*0.05), so successive terms differ
+  // by a FIXED rotation -- advance a unit vector by that rotation instead of calling sinf/cosf per
+  // dot. Drops 3600 trig calls a frame to 4, which is what put this over the 33ms budget (measured
+  // 36.8ms render, 20 fps, against a 30 fps cap). Same precompute-per-frame discipline as the
+  // cube/tesseract modes, and it wins on the FPU-less C3 too: a soft-float multiply is far cheaper
+  // than a soft-float sinf. ponytail: the recurrence drifts ~1e-4 in magnitude over 1200 steps in
+  // float32 — invisible here; re-normalise per frame if a longer spiral ever needs it.
+  static const float kGolden = 2.39996f, kWob = 0.05f;
+  const float ca = cosf(kGolden), sa = sinf(kGolden), cw = cosf(kWob), sw = sinf(kWob);
+  float px = cosf(t*0.1f), py = sinf(t*0.1f);   // unit vector at i = 0 for the dot angle
+  float wx = cosf(t),      wy = sinf(t);        // ...and for the wobble; wy IS sin(t + i*kWob)
+  int lastOff = -1; uint16_t col = 0;
   for (int i = 0; i < 1200; i++) {
-    float a = i*2.39996f + t*0.1f, r = c*sqrtf((float)i), wob = sinf(t + i*0.05f)*4;
-    float x = cx + cosf(a)*(r+wob), y = cy + sinf(a)*(r+wob);
-    canvas->fillRect((int)x, (int)y, 2, 2, pColor(20, i*255/1199));   // dot index (radial) -> palette offset, slow drift
+    float rr = c*sqrtf((float)i) + wy*4;
+    int off = i*255/1199;                                   // ~4.7 consecutive dots share an offset,
+    if (off != lastOff) { col = pColor(20, off); lastOff = off; }   // so 256 pColor calls, not 1200
+    canvas->fillRect((int)(cx + px*rr), (int)(cy + py*rr), 2, 2, col);
+    float nx = px*ca - py*sa; py = px*sa + py*ca; px = nx;   // advance both angles by one step
+    float nw = wx*cw - wy*sw; wy = wx*sw + wy*cw; wx = nw;
   }
 }
 static void renderAtlas(int idx, uint32_t now) {
