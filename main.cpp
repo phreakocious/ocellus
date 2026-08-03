@@ -13,6 +13,7 @@
 #include "animations.h"
 #include "matrix_name.h"
 #include "bounce_splash.h"
+#include "splash_name.h"
 #include "fb_roll.h"      // torus-scroll the frame for the EV_WANDER_OFF rare event
 #include "dvd_logo.h"
 #include "toaster_sprites.h"
@@ -30,6 +31,7 @@
 #include "treatcat.h"
 #include "greetz.h"
 #include "vga_font.h"
+#include "vga_draw.h"
 #if OCELLUS_AUDIO
 #include <WiFi.h>
 #include <esp_now.h>
@@ -1291,55 +1293,103 @@ void slideSplash(const std::string& name) {
   }
 }
 
+// The boot splash borrows the greetz scroller's parallax starfield (spec 2026-08-02). Both are
+// file-scope statics defined further down with renderGreetz (~line 2685); forward-declaring is
+// enough because this is one translation unit, so no code has to move.
+static void greetzSeedStars();
+static void greetzDrawStarfield();
+
+// Dwell timings are WALL CLOCK, not frame counts. A frame here is render + flush + delay(16),
+// and the 115 KB flush alone measures ~14 ms on the Waveshare board -- so a "225 frame" dwell would
+// run ~7 s, not 3.6. Only the clock can express a duration on this device.
+// FADEOUT_MS=1200 is ~39 frames at ~31ms/frame -- comfortably past the ~33 steps fadeFrame(15,16)
+// needs to walk a full 6-bit green channel to true black (floor(v*15/16) from 63 is still 18/63
+// after only 16 steps), so the terminal fillScreen(BLACK) below lands as a guarantee, not a cut.
+// 2400 + 1200 = 3600ms total, matching the pre-existing dwell this replaced.
+static const uint32_t SPLASH_HOLD_MS    = 2400;   // animated hold on the settled name
+static const uint32_t SPLASH_FADEOUT_MS = 1200;   // decay to black before the first animation
+
 // Bounce name reveal: letters fly in off-screen, rattle off the round bezel a few times under
 // gravity, and settle into a bottom arc *in order*. Trajectories are reverse-simulated from the
 // finished arc (see bounce_splash.h) so the landing is exact -- never a snap. Blocking; runs once
 // at boot before loop().
-void bounceSplash(const std::string& name) {
+void bounceSplash(const std::string& rawName) {
+  // Transliterate FIRST: the measured length must equal the drawn length, and "ss" for a sharp s
+  // can GROW the string, so this has to precede the MAX_LETTERS test.
+  std::string name = splashAsciiName(rawName);
+  if (name.empty()) {
+    if (rawName.empty()) return;   // no name configured at all -- nothing to reveal
+    name = "ocellus";              // name was entirely non-ASCII (Cyrillic/CJK/emoji) and the VGA
+  }                                // font has no glyphs for it: show the config default rather
+                                   // than boot to a silent blank screen
   int len = (int)name.size();
-  if (len < 1) return;
-  if (len > bounce::MAX_LETTERS) { slideSplash(name); return; }   // arc too crowded -> reuse slide
+  if (len > bounce::MAX_LETTERS) {          // arc too crowded -> reuse slide
+    slideSplash(name);
+    canvas->fillScreen(BLACK); canvas->flush();   // same residue guarantee as the main exit below
+    return;
+  }
 
   static bounce::Trajectories T;             // ~13KB -> static, never on the stack
   bounce::compute(T, len, esp_random());
-  int ts = bounce::geometryFor(len).ts;
+  const int s  = bounce::geometryFor(len).scale;
+  const int go = s;    // glow offset: holds the halo at 1/8 of glyph width at every scale
 
   uint16_t core[40], glow[40];
   splashLetterColors(core, glow, len);
 
+  greetzSeedStars();
+
+  // One letter centred on (px,py): palette-tinted glow halo behind a bright core.
+  auto drawLetter = [&](int i, int px, int py) {
+    int lx = px - VGA_FONT_W * s / 2, ly = py - VGA_FONT_H * s / 2;
+    for (int oy = -go; oy <= go; oy += go)
+      for (int ox = -go; ox <= go; ox += go)
+        vgaBlit(canvas, name[i], lx + ox, ly + oy, s, glow[i]);
+    vgaBlit(canvas, name[i], lx, ly, s, core[i]);
+  };
+
   for (int f = 0; f < T.maxFrames; f++) {
     if (f == 0) canvas->fillScreen(BLACK);             // clean start; then fade to leave vapor trails
     else        fadeFrame(13, 16);
-    canvas->setTextSize(ts);
+    greetzDrawStarfield();       // AFTER the fade -- last frame's stars survive as streaks, which
+                                 // is the intended look, not a smear bug
     for (int i = 0; i < len; i++) {
       int local = f - (T.maxFrames - T.frames[i]);   // align every letter's arrival on the last frame
       if (local < 0) continue;                        // this one hasn't entered yet
-      int lx = T.x[i][local] - 3 * ts, ly = T.y[i][local] - 4 * ts;  // center the 6ts x 8ts glyph on its point
-      canvas->setTextColor(glow[i]);                  // palette-tinted glow behind a bright core
-      for (int oy = -2; oy <= 2; oy += 2)
-        for (int ox = -2; ox <= 2; ox += 2) { canvas->setCursor(lx + ox, ly + oy); canvas->print(name[i]); }
-      canvas->setTextColor(core[i]);
-      canvas->setCursor(lx, ly); canvas->print(name[i]);
+      drawLetter(i, T.x[i][local], T.y[i][local]);
     }
     canvas->flush();
     delay(16);
   }
-  // Let the final motion trails decay (settled letters redrawn crisp on top), then hold the name.
-  for (int f = 0; f < 24; f++) {                      // ~380ms: trails reach true black
+
+  // Animated hold: stars keep drifting, settled letters redrawn crisp over the fade. This also
+  // absorbs the old 24-frame trail-decay loop -- with a live starfield there is no longer a
+  // "trails have reached true black" moment to wait for.
+  uint32_t t0 = millis();
+  while (millis() - t0 < SPLASH_HOLD_MS) {
     fadeFrame(13, 16);
-    canvas->setTextSize(ts);
-    for (int i = 0; i < len; i++) {
-      int lx = T.x[i][T.frames[i] - 1] - 3 * ts, ly = T.y[i][T.frames[i] - 1] - 4 * ts;
-      canvas->setTextColor(glow[i]);
-      for (int oy = -2; oy <= 2; oy += 2)
-        for (int ox = -2; ox <= 2; ox += 2) { canvas->setCursor(lx + ox, ly + oy); canvas->print(name[i]); }
-      canvas->setTextColor(core[i]);
-      canvas->setCursor(lx, ly); canvas->print(name[i]);
-    }
+    greetzDrawStarfield();
+    for (int i = 0; i < len; i++)
+      drawLetter(i, T.x[i][T.frames[i] - 1], T.y[i][T.frames[i] - 1]);
     canvas->flush();
     delay(16);
   }
-  delay(3600);  // dwell on the fully-settled, trail-free name -- it's the payoff
+
+  // Fade-out: draw nothing and let the frame drain, so the splash exits deliberately instead of
+  // cutting to the first animation.
+  uint32_t t1 = millis();
+  while (millis() - t1 < SPLASH_FADEOUT_MS) {
+    fadeFrame(15, 16);
+    canvas->flush();
+    delay(16);
+  }
+
+  // dim565 TRUNCATES, so the step count needed to reach true black is not knowable inside a
+  // wall-clock window (a full 6-bit green needs 33 steps of 15/16, and is still 2 after 31).
+  // Several animations deliberately skip their first clear -- pipes, slideshow, boids, swirl,
+  // treatcat, GIFs -- so leftover splash pixels would persist into them. Guarantee black.
+  canvas->fillScreen(BLACK);
+  canvas->flush();
 }
 
 #if OCELLUS_AUDIO
@@ -1663,6 +1713,8 @@ void setup() {
   if (coldBoot && gConfig.nameBootSplash && !gConfig.name.empty()) {            // name reveal only on real power-on, not on every wake
     const std::string& s = gConfig.bootSplashStyle;
     (s == "slide" ? slideSplash : s == "bounce" ? bounceSplash : bootSplash)(gConfig.name);
+    canvas->fillScreen(BLACK); canvas->flush();   // no splash style may leak into an animation that
+                                                  // skips its first-frame clear (pipes/boids/GIF/...)
   }
 
   uint32_t readyAt = millis();
@@ -2762,18 +2814,7 @@ static void renderGreetz(uint32_t now) {
     int idx = (((x * GREETZ_X_STEP) + (gGreetzOff * GREETZ_T_STEP)) >> 8) & 0xFF;
     int y = 120 + (fastSin(idx) * GREETZ_AMP) / 127 - (VGA_FONT_H * 2) / 2;
 
-    const uint8_t* rows = VGA_FONT[ch - VGA_FONT_FIRST];
-    for (int r = 0; r < VGA_FONT_H; r++) {
-      uint8_t bits = rows[r];
-      if (!bits) continue;
-      for (int b = 0; b < VGA_FONT_W; b++) {
-        if (!(bits & (0x80 >> b))) continue;
-        // ponytail: fillRect clips against the canvas bounds for us, which is what keeps a
-        // partly-offscreen glyph from writing outside the framebuffer. Direct fb writes would be
-        // faster but would need that clip written by hand -- revisit only if this measures hot.
-        canvas->fillRect(x + b * 2, y + r * 2, 2, 2, col);
-      }
-    }
+    vgaBlit(canvas, ch, x, y, 2, col);
   }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cmath>
+#include "vga_font.h"
 
 // Boot "bounce" name reveal, computed by REVERSE SIMULATION so a genuinely random-looking
 // entry lands *exactly* in order along a bottom arc -- no snap, no cheat.
@@ -34,7 +35,7 @@ struct Geometry {
   float glyphR;       // glyph collision radius (px) -- keeps the glyph fully inside R at a bounce
   float gravity;      // px / frame^2 (screen y grows downward)
   float restitution;  // 0..1 wall energy retained on a forward bounce
-  int   ts;           // GFX text size the caller renders at (carried here so it's picked once)
+  int   scale;        // VGA font scale the caller renders at (carried here so it's picked once)
 };
 
 struct Trajectories {
@@ -51,29 +52,44 @@ inline uint32_t lcg(uint32_t& s) { s = s * 1664525u + 1013904223u; return s; }
 inline float    frand(uint32_t& s) { return (lcg(s) >> 8) * (1.0f / 16777216.0f); }  // [0,1)
 
 constexpr float ARC_SPACING  = 1.15f;   // adjacent glyph centers = 1.15 * glyph width (slight gap)
-constexpr float ARC_SPAN_MAX = 2.2f;    // rad: cap total arc width (~126deg) so it stays a bottom arc
+constexpr float ARC_SPAN_MAX = 2.44f;   // rad: cap total arc width (~140deg) so it stays a bottom arc
 
-// Angular gap between adjacent letters at a given text size. glyphR = 5*ts (half the 6ts x 8ts box);
-// rArc reserves that half-diagonal so nothing clips the round edge. Shared by the size picker and
-// computeSlots so they can never disagree.
-inline float arcStepRad(int len, int ts) {
-  float glyphR = 5.0f * ts, rArc = 120.0f - glyphR - 4.0f;
-  return (len > 1) ? (ARC_SPACING * 6.0f * ts) / rArc : 0.0f;
+// Glyph collision radius: half-diagonal of the scale * (VGA_FONT_W x VGA_FONT_H) cell. Derived
+// from the font constants rather than a literal so it cannot drift if the font is re-baked.
+// sqrtf runs once per splash (never per frame) -- safe on the FPU-less C3.
+inline float glyphRadiusFor(int scale) {
+  float hw = VGA_FONT_W * 0.5f * scale, hh = VGA_FONT_H * 0.5f * scale;
+  return sqrtf(hw * hw + hh * hh);
 }
 
-// Largest text size whose whole arc still fits within ARC_SPAN_MAX -- readable glyphs, shrinking
-// only as far as a long name forces. (ts=1 is a floor the <=16-letter cap never actually reaches.)
-inline int textSizeFor(int len) {
-  for (int ts = 6; ts > 1; ts--)
-    if (arcStepRad(len, ts) * (len - 1) <= ARC_SPAN_MAX) return ts;
+// Angular gap between adjacent letters at a given font scale. rArc reserves the glyph's
+// half-diagonal so nothing clips the round edge. Shared by the size picker and computeSlots so
+// they can never disagree.
+inline float arcStepRad(int len, int scale) {
+  float glyphR = glyphRadiusFor(scale), rArc = 120.0f - glyphR - 4.0f;
+  return (len > 1) ? (ARC_SPACING * (float)VGA_FONT_W * scale) / rArc : 0.0f;
+}
+
+// Largest font scale whose whole arc still fits within ARC_SPAN_MAX -- readable glyphs,
+// shrinking only as far as a long name forces. Ladder: 1-6 -> 4x, 7-8 -> 3x, 9-14 -> 2x,
+// 15-16 -> 1x. (A 1-letter name takes 4x: arcStepRad returns 0 for len <= 1.)
+//
+// The cap is what sets those boundaries, and it cannot separate them: a 6-letter name needs
+// 2.2936 rad for 4x and a 14-letter name needs 2.4380 for 2x, so any cap clearing the second
+// clears the first. 2.44 was chosen on glass (2026-08-02) to lift BOTH -- 14 letters read too
+// small at 1x. Widening costs nothing at the rim: the worst glyph-box corner is rArc + glyphR,
+// which is 116.0 at every scale regardless of how wide the arc spreads.
+inline int scaleFor(int len) {
+  for (int s = 4; s > 1; s--)
+    if (arcStepRad(len, s) * (len - 1) <= ARC_SPAN_MAX) return s;
   return 1;
 }
 
 inline Geometry geometryFor(int len) {
   Geometry g;
   g.cx = 120; g.cy = 120; g.R = 120;
-  g.ts = textSizeFor(len);
-  g.glyphR = 5.0f * g.ts;
+  g.scale = scaleFor(len);
+  g.glyphR = glyphRadiusFor(g.scale);
   g.rArc = g.R - g.glyphR - 4.0f;   // ride the bottom rim, glyph fully on-screen
   g.gravity = 0.5f;
   g.restitution = 0.88f;            // "rubber" -- lively bounces, gentle settle
@@ -83,7 +99,7 @@ inline Geometry geometryFor(int len) {
 // Slot centers along the bottom arc, name order left-to-right. One-time trig (boot only).
 inline void computeSlots(Trajectories& T, const Geometry& g) {
   const float DOWN = 1.5707963f;                 // straight down (screen y grows downward)
-  float step = arcStepRad(T.count, g.ts);        // same spacing the size picker solved against
+  float step = arcStepRad(T.count, g.scale);     // same spacing the size picker solved against
   float a0 = DOWN + step * (T.count - 1) * 0.5f; // largest angle = leftmost letter (i=0)
   for (int i = 0; i < T.count; i++) {
     float a = a0 - step * i;
@@ -129,7 +145,9 @@ inline void simLetter(Trajectories& T, int i, const Geometry& g, uint32_t& seed)
         nx = g.cx + nnx * (Rw - 1.0f); // nudge just inside so we don't re-trigger next step
         ny = g.cy + nny * (Rw - 1.0f);
         bounces++;
-      } else if (d2 >= Roff * Roff) {  // capped out and now fully off-screen: exit
+      } else if (m < MAX_FRAMES && d2 >= Roff * Roff) {  // capped out and now fully off-screen: exit
+        // m < MAX_FRAMES guards the writes below: without it, a trajectory that runs all the way
+        // to the cap writes T.x[i][MAX_FRAMES] / T.y[i][MAX_FRAMES] -- one past the array.
         T.x[i][m] = (int16_t)lroundf(nx);
         T.y[i][m] = (int16_t)lroundf(ny);
         m++;

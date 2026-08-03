@@ -1,6 +1,7 @@
 #include <unity.h>
 #include <cmath>
 #include "../../bounce_splash.h"
+#include "../../vga_font.h"
 
 using namespace bounce;
 
@@ -41,17 +42,47 @@ void test_enters_offscreen_lands_onscreen() {
   }
 }
 
-// Animation length stays in a sane window (~1.3s..~3s at 16ms/frame). Doubles as a tuning guard:
-// if physics constants drift and trajectories balloon or collapse, this trips.
+// Animation length stays in a sane window (~2.5s..~6s at the real ~31ms/frame -- render + the
+// ~14ms framebuffer flush + delay(16), not the 16ms/frame a frame count alone would suggest).
+// Doubles as a tuning guard: if physics constants drift and trajectories balloon or collapse,
+// this trips. 4000 seeds so the sweep actually reaches the MAX_FRAMES cap condition (Fix 1) --
+// at seed 3635 / len 13, one letter legitimately runs all the way to the cap (frames[i] ==
+// MAX_FRAMES), which is exactly the case Fix 1's `m < MAX_FRAMES` guard makes safe instead of a
+// one-past-the-end write. That means the old `<= 190` / `< MAX_FRAMES` bounds (calibrated against
+// a 40-seed sweep that never reached the cap) no longer hold; the real invariant is the per-letter
+// bound below.
+// The per-letter bound is necessary but NOT sufficient as a tuning guard, and on its own it is a
+// tautology: `while (m < MAX_FRAMES)` makes `1 <= frames[i] <= MAX_FRAMES` true by construction,
+// so no drift in gravity, restitution or the arc geometry could ever trip it. It earns its place
+// only as a regression guard for the one-past-the-end write that used to be possible here.
+//
+// The tuning guard is the aggregate below. Hitting the cap is legitimate but must stay RARE: a
+// capped trajectory is truncated, so that letter pops in mid-screen instead of flying in.
+// Measured on the shipped constants over exactly this sweep (2026-08-02): 1 cap hit in 29,988
+// letters, 6 seeds past 190 frames, mean length 100.4, shortest 40. The thresholds sit well clear
+// of those, so ordinary variation passes while physics that BALLOONS (cap hits and long runs
+// explode) or COLLAPSES (mean and minimum fall) trips them. Re-measure before retuning them.
 void test_animation_length_sane() {
-  for (uint32_t seed = 1; seed <= 40; seed++) {
+  long capHits = 0, over190 = 0, letters = 0, sum = 0;
+  int shortest = MAX_FRAMES;
+  for (uint32_t seed = 1; seed <= 4000; seed++) {
     Trajectories T;
     compute(T, (int)(seed % 12) + 2, seed);
     TEST_ASSERT_TRUE(T.maxFrames >= 20);
-    TEST_ASSERT_TRUE(T.maxFrames <= 190);       // < MAX_FRAMES: no letter hit the runaway cap
-    for (int i = 0; i < T.count; i++)
-      TEST_ASSERT_TRUE(T.frames[i] < MAX_FRAMES);
+    TEST_ASSERT_TRUE(T.maxFrames <= MAX_FRAMES);   // in-bounds: guards the OOB write, not the tuning
+    if (T.maxFrames > 190) over190++;
+    for (int i = 0; i < T.count; i++) {
+      TEST_ASSERT_TRUE(T.frames[i] >= 1 && T.frames[i] <= MAX_FRAMES);
+      letters++; sum += T.frames[i];
+      if (T.frames[i] == MAX_FRAMES) capHits++;
+      if (T.frames[i] < shortest) shortest = T.frames[i];
+    }
   }
+  double mean = (double)sum / (double)letters;
+  TEST_ASSERT_TRUE(capHits  <= 10);                    // measured 1
+  TEST_ASSERT_TRUE(over190  <= 40);                    // measured 6
+  TEST_ASSERT_TRUE(shortest >= 25);                    // measured 40
+  TEST_ASSERT_TRUE(mean >= 80.0 && mean <= 125.0);     // measured 100.4
 }
 
 // Same seed reproduces (deterministic LCG, not Arduino random()).
@@ -72,6 +103,40 @@ void test_clamps_letter_count() {
   TEST_ASSERT_EQUAL_INT(MAX_LETTERS, T.count);
 }
 
+// The ladder: bigger glyphs for short names, shrinking only as far as a long name forces.
+// Boundaries are the point -- midpoints alone would not catch an off-by-one in the loop bound.
+void test_scale_ladder_matches_name_length() {
+  const int expect[17] = { 0, 4,4,4,4,4,4, 3,3, 2,2,2,2,2,2, 1,1 };
+  //  index:                  1 2 3 4 5 6  7 8  9 ...   14  15,16
+  for (int len = 1; len <= 16; len++)
+    TEST_ASSERT_EQUAL_INT(expect[len], scaleFor(len));
+}
+
+// The GLYPH BOX may never cross the round rim. The glow halo is allowed to, by owner decision
+// (2026-08-02): reserving room for it would cost an 8-letter name a whole size step, and the
+// worst overshoot is 1.37 px at scale 4 (0.03 px at 3x) -- a sliver of halo cut by the bezel.
+// So this asserts the box, not the box+halo.
+//
+// This deliberately does NOT assert `slotDistance + glyphR <= 120`. That form is a TAUTOLOGY:
+// geometryFor defines rArc = R - glyphR - 4 and computeSlots puts every slot at exactly rArc,
+// so slotDistance + glyphR == 116.0 for ANY glyphR at all -- it would happily pass with the old
+// GFX 5.0f*ts constant left in by mistake. Deriving the corners from the font dimensions
+// instead breaks that circularity.
+void test_glyph_corners_stay_inside_the_rim() {
+  for (int len = 1; len <= MAX_LETTERS; len++) {
+    Trajectories T;
+    compute(T, len, 4242);
+    const int s    = geometryFor(len).scale;
+    const float hw = VGA_FONT_W * 0.5f * s;   // glyph box half-width  (halo excluded, see above)
+    const float hh = VGA_FONT_H * 0.5f * s;   // glyph box half-height
+    for (int i = 0; i < T.count; i++)
+      for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2)
+          TEST_ASSERT_TRUE(distToCenter((int)(T.slotX[i] + sx * hw),
+                                        (int)(T.slotY[i] + sy * hh)) <= 120.0f);
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_lands_exactly_on_ordered_slots);
@@ -80,5 +145,7 @@ int main(int, char**) {
   RUN_TEST(test_animation_length_sane);
   RUN_TEST(test_deterministic);
   RUN_TEST(test_clamps_letter_count);
+  RUN_TEST(test_scale_ladder_matches_name_length);
+  RUN_TEST(test_glyph_corners_stay_inside_the_rim);
   return UNITY_END();
 }
