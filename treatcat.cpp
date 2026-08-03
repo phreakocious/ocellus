@@ -1,7 +1,7 @@
 // Interactive "treat cat" (anim id 46). Ported from
 // references/treatcat-round-lcd/treatcat_gc9a01/treatcat_gc9a01.ino (LovyanGFX) to ocellus's
 // Arduino_GFX. Renders into the shared canvas; dispatched from main.cpp (renderTreatcat). Grown into
-// a light care-loop pet: the pure PetState model (pet_state.*) drives an animated cat (kitty_anim.h).
+// a light care-loop pet: the pure PetState model (pet_state.*) drives a procedural cat (cat_proc.h).
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <math.h>

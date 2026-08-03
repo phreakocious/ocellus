@@ -33,6 +33,8 @@ except ImportError:
     sys.exit("needs pyserial -- run with ~/.platformio/penv/bin/python, or: pip install pyserial")
 
 CH343_ID = (0x1A86, 0x55D3)   # Waveshare board's CH343 UART -- opening it auto-resets, so the config probe can't see it
+ESPRESSIF_VID = 0x303A        # native USB-Serial/JTAG (bench DevKitC, S3-Zero, C3) -- all 303A:1001, indistinguishable by id
+BUSY = object()               # sentinel: port held open, which is NOT the same as "answered nothing"
 
 PIO = os.path.expanduser("~/.platformio/penv/bin/pio")
 if not os.path.exists(PIO):
@@ -82,17 +84,53 @@ def _reply(s, obj):
     return None
 
 
-def probe(port):
-    """True if the port answers the ocellus config protocol with a config object."""
+def get_config(port):
+    """The unit's config dict, or None if this port isn't an ocellus (BUSY if it's held open --
+    almost always a config.html Web Serial tab, which is a very different thing from silence)."""
     try:
         s = _open(port)
     except Exception:
-        return False   # busy (Web Serial tab?) or vanished
+        return BUSY    # held by a Web Serial tab / another probe, or vanished
     try:
         d = _reply(s, {"cmd": "get"})
-        return isinstance(d, dict) and "brightness" in d and "maxFps" in d
+        return d if isinstance(d, dict) and "brightness" in d and "maxFps" in d else None
     finally:
         s.close()
+
+
+def probe(port):
+    """True if the port answers the ocellus config protocol with a config object."""
+    return isinstance(get_config(port), dict)
+
+
+def list_boards(do_probe):
+    """Every attached board of ours, by USB descriptor -- no port is opened, so nothing reboots.
+    This is the answer to "which S3 is which": the bench DevKitC, the S3-Zero and the C3 all
+    enumerate as 303A:1001 and chip-detect cannot separate them, but their USB serial number IS
+    the MAC -- a stable per-board id, free from the descriptor, and unlike an `esptool flash_id`
+    probe it doesn't halt the board. --probe additionally asks each unit its configured name,
+    which costs ~3s per port and reboots any ship board (opening a CH343 asserts reset)."""
+    rows = [("PORT", "VID:PID", "KIND", "USB SERIAL / MAC", "LOCATION", "NAME")]
+    for p in sorted(list_ports.comports(), key=lambda x: x.device):
+        if (p.vid, p.pid) == CH343_ID:
+            kind = "ship (CH343)"
+        elif p.vid == ESPRESSIF_VID:
+            kind = "native USB"
+        else:
+            continue          # not one of ours
+        name = "-"
+        if do_probe:
+            cfg = get_config(p.device)
+            name = ("(busy -- close the config.html tab)" if cfg is BUSY else
+                    "(not an ocellus)" if cfg is None else cfg.get("name") or "(unnamed)")
+        rows.append((p.device, "%04X:%04X" % (p.vid, p.pid), kind,
+                     p.serial_number or "-", p.location or "-", name))
+    if len(rows) == 1:
+        print("No ocellus boards attached.")
+        return
+    w = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w[i]) for i, c in enumerate(r)).rstrip())
 
 
 def ch343_ports():
@@ -142,7 +180,16 @@ def main():
     ap.add_argument("--gifs", metavar="SET",
                     help="upload a baked GIF set to the filesystem and nothing else "
                          "(no firmware build or flash) -- bake it first with tools/bake_gif.py --set SET")
+    ap.add_argument("--list", action="store_true",
+                    help="list attached boards (USB descriptor only, nothing is opened or reset) and exit")
+    ap.add_argument("--probe", action="store_true",
+                    help="with --list, also ask each unit its configured name (~3s/port; reboots ship boards)")
     args = ap.parse_args()
+
+    if args.list:
+        list_boards(args.probe)
+        return
+
     tgt = TARGETS[args.target]
 
     port = args.port or find_port(args.target == "s3-touch")
