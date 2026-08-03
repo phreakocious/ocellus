@@ -132,6 +132,19 @@ static uint32_t gGifClipStartMs = 0;     // when the current clip started (hold 
 static uint32_t gGifNextFrameMs = 0;     // honor the GIF's own per-frame delay
 static int      gGifLoops = 0;           // completed loops of the current clip
 
+// --- Clip hold (spec 2026-08-03): swipe-down pins the current clip/slide -------------------
+// gClipHoldReq is the ONLY field the button task touches, matching gCarouselReq/g_pendingAnim.
+// Everything else here is written from loop() only, so it needs no volatile.
+static volatile bool gClipHoldReq = false;   // swipe-down mailbox; drained in loop()
+static bool     gClipHold     = false;       // session-only; never persisted (see spec)
+static bool     gClipPipOn    = false;       // pip is live this frame (Task 2)
+static uint32_t gClipPipStart = 0;           // elapsed-compared, never a bare deadline
+
+// Every path that invalidates "the current clip" clears the hold: mode change, and any list
+// rebuild (upload, bad file, battery splash). A hold surviving a rebuild would pin an arbitrary
+// index, and a hold surviving a mode change would suppress the GLOBAL auto-cycler forever.
+static void clipHoldClear() { gClipHoldReq = false; gClipHold = false; gClipPipOn = false; }
+
 // Slideshow (id SLIDESHOW_ID) playback state -- declared up here (not beside renderSlideshow, below)
 // because onAnimEnter (well above renderSlideshow in the file) resets gSlideIdx on mode entry.
 static int      gSlideIdx = 0, gSlideCount = 0;
@@ -825,6 +838,7 @@ static int moodPupilAim(int heldTarget) {
 
 // Re-init per-animation state when an animation becomes active.
 void onAnimEnter(uint8_t id) {
+  clipHoldClear();   // a hold must never outlive its mode (esp. the global auto-cycle gate)
   ensureRadio(isAudioMode(id));
 #if OCELLUS_AUDIO
   if (isAudioMode(id)) {                          // reset the duty-cycle timers to entry time so the
@@ -974,7 +988,15 @@ void buttonReadTask(void *pvParameters) {
           gTreatTap = (1u << 31) | ((uint32_t)tx << 12) | (uint32_t)ty;
         } else if (currentAnimId < EYE_COUNT) { isJittering = true; jitterEndTime = millis() + 500; }
         break;
-      case TOUCH_SWIPE_DOWN:                    // reserved for the on-device anim config (own TODO)
+      case TOUCH_SWIPE_DOWN:
+        // Mode-scoped: only these two modes claim swipe-down, so the gesture stays free for the
+        // on-device anim config it is reserved for. Flag-only -- loop() does all the real work.
+        if (gCarouselOpen) break;
+        if (currentAnimId == GIF_ID || currentAnimId == SLIDESHOW_ID) {
+          gClipHoldReq = true;
+          lastInteractionTime = millis();
+        }
+        break;
       case TOUCH_NONE:
         break;
     }
@@ -1894,6 +1916,7 @@ void renderGif(uint32_t now) {
     gGifCount = gGifStore.list(gGifList, GIF_MAX);
     if (gGifIdx >= gGifCount) gGifIdx = 0;
     gGifsDirty = false;
+    clipHoldClear();   // indices shifted; a hold would now pin an arbitrary clip
     if (gGifCount > 0 && !gifOpenClip(gGifIdx)) gGifCount = 0;   // unreadable -> fall to empty state
   }
   if (gGifCount == 0) { gifNote("No GIFs", "upload via config"); return; }
@@ -1911,7 +1934,7 @@ void renderGif(uint32_t now) {
     // one always gets at least one full pass.
     uint32_t hold = (uint32_t)gConfig.gifSec * 1000UL;
     bool done = (now - gGifClipStartMs) >= hold;
-    if (done && gGifCount > 1) {
+    if (done && gGifCount > 1 && !gClipHold) {
       gGifIdx = (gGifIdx + 1) % gGifCount;
       if (!gifOpenClip(gGifIdx)) { gGifsDirty = true; }   // bad file -> re-list next frame
     } else {
@@ -1939,6 +1962,7 @@ void renderSlideshow(uint32_t now) {
     if (gSlideIdx >= gSlideCount) gSlideIdx = 0;
     gSlidePhase = 0; gSlideStep = 0; gSlideShownMs = now;
     gSlidesDirty = false;
+    clipHoldClear();   // indices shifted; a hold would now pin an arbitrary slide
     backlightSet(effectiveBrightness());   // undo any interrupted fade -- else a mid-fade slide_clear leaves the empty-state text on a dark panel
     if (gSlideCount > 0) loadSlideToFb(gSlideIdx);
   }
@@ -1953,7 +1977,7 @@ void renderSlideshow(uint32_t now) {
   uint32_t holdMs = (uint32_t)gConfig.slideshowSec * 1000UL;
   switch (gSlidePhase) {
     case 0:                                                  // STEADY
-      if (gSlideCount > 1 && now - gSlideShownMs >= holdMs) { gSlidePhase = 1; gSlideStep = SLIDE_FADE_STEPS; }
+      if (gSlideCount > 1 && !gClipHold && now - gSlideShownMs >= holdMs) { gSlidePhase = 1; gSlideStep = SLIDE_FADE_STEPS; }
       break;
     case 1:                                                  // FADE-OUT
       gSlideStep--;
@@ -4668,6 +4692,24 @@ void loop() {
 #if defined(BOARD_WAVESHARE_128)
   carouselUpdate(now);
 #endif
+  if (gClipHoldReq) {
+    gClipHoldReq = false;
+    gClipHold = !gClipHold;
+    // Cancel an in-flight crossfade and settle on whatever slide is resident RIGHT NOW: in phase 1
+    // (fade-out) that is still the old slide; in phase 2 (fade-in) gSlideIdx already advanced and
+    // loadSlideToFb already ran, so it is the new one. Either is "hold what I am looking at".
+    // Gating phase 0 alone would let phases 1/2 finish and advance anyway.
+    if (gClipHold && currentAnimId == SLIDESHOW_ID && gSlidePhase != 0) {
+      gSlidePhase = 0; gSlideStep = 0;
+      backlightSet(effectiveBrightness());        // undo the partial fade
+    }
+    // Restamp all three dwell timers either way. On hold it is harmless (the gates are off); on
+    // resume it is what turns an instant jump from an elapsed timer into a full fresh dwell, and
+    // stops the auto-cycler firing the moment you let go. Unconditional beats two branches.
+    uint32_t t = millis();
+    gGifClipStartMs = t; gSlideShownMs = t; gLastCycle = t;
+    gClipPipOn = true; gClipPipStart = t;         // Task 2 draws it; harmless until then
+  }
   if (gGifUploading) {                        // same deal for a GIF upload (see the slide case below)
     if (millis() - gGifRxMs > 3000) {         // host vanished mid-upload -> drop the partial tmp
       if (gGifUp.active) gGifStore.abortTmp();
@@ -4751,7 +4793,9 @@ void loop() {
   // loop() context -- the same context g_pendingAnim defers to. Debug screens (non-playable ids)
   // are exempt so the cycler can't yank a bench session.
   uint32_t cycMs = (uint32_t)gConfig.cycleSec * 1000UL;
-  if (gConfig.cycleSec && isPlayableId(currentAnimId) && !gCarouselOpen) {
+  // !gClipHold too: without this the clip is held but the unit still wanders off to another
+  // animation on the cycleSec timer, which is not what "stay on this one" means.
+  if (gConfig.cycleSec && isPlayableId(currentAnimId) && !gCarouselOpen && !gClipHold) {
     // Fresh millis(), NOT the loop-top `now` snapshot -- same underflow trap as the sleep check
     // above: a manual pick applied this iteration sets gLastCycle to a LATER millis(), and
     // `now - gLastCycle` would wrap huge and fire the cycler in the same frame, clobbering the pick.
