@@ -145,6 +145,13 @@ static uint32_t gClipPipStart = 0;           // elapsed-compared, never a bare d
 // index, and a hold surviving a mode change would suppress the GLOBAL auto-cycler forever.
 static void clipHoldClear() { gClipHoldReq = false; gClipHold = false; gClipPipOn = false; }
 
+// Bottom-centre. The round bezel eats the corners: at y=196 the panel's half-width is
+// sqrt(120*120 - 76*76) ~= 93 px, so x 100..140 is comfortably inside the glass.
+static const int PIP_X = 100, PIP_Y = 196, PIP_W = 40, PIP_H = 20;
+static uint16_t gClipPipUnder[PIP_W * PIP_H];   // 1600 B in BSS -- no malloc, so no failure path
+// clipPipSave/clipPipRestore/clipPipDraw (Task 2) live just above loop(), not here: they touch
+// `canvas` and `currentAnimId`, both declared later in the file (lines ~338, ~375).
+
 // Slideshow (id SLIDESHOW_ID) playback state -- declared up here (not beside renderSlideshow, below)
 // because onAnimEnter (well above renderSlideshow in the file) resets gSlideIdx on mode entry.
 static int      gSlideIdx = 0, gSlideCount = 0;
@@ -4654,6 +4661,39 @@ static void carouselUpdate(uint32_t now) {
   }
 }
 
+// Save/restore EVERY frame (save -> draw -> flush -> restore), not save-once-restore-later.
+// gifDrawCb writes only the current frame's rectangle and skips transparent pixels, so an overlay
+// is never reliably painted over -- but a single underlay saved 25 frames earlier would restore
+// stale artwork over anything that animated beneath it. Per-frame keeps the canvas clean always.
+static void clipPipSave() {
+  uint16_t* fb = (uint16_t*)canvas->getFramebuffer();
+  for (int r = 0; r < PIP_H; r++)
+    memcpy(&gClipPipUnder[r * PIP_W], fb + (size_t)(PIP_Y + r) * 240 + PIP_X, PIP_W * 2);
+}
+
+static void clipPipRestore() {
+  uint16_t* fb = (uint16_t*)canvas->getFramebuffer();
+  for (int r = 0; r < PIP_H; r++)
+    memcpy(fb + (size_t)(PIP_Y + r) * 240 + PIP_X, &gClipPipUnder[r * PIP_W], PIP_W * 2);
+}
+
+// Returns true if it drew (and therefore saved an underlay the caller must restore after flush).
+static bool clipPipDraw() {
+  if (!gClipPipOn) return false;
+  if (currentAnimId != GIF_ID && currentAnimId != SLIDESHOW_ID) { gClipPipOn = false; return false; }
+  if (millis() - gClipPipStart >= 800) { gClipPipOn = false; return false; }   // elapsed, not deadline
+  clipPipSave();
+  canvas->fillRect(PIP_X, PIP_Y, PIP_W, PIP_H, 0x18E3);          // dim slate backing so it reads over any art
+  const uint16_t fg = 0xFFFF;
+  if (gClipHold) {                                                // held: pause bars
+    canvas->fillRect(PIP_X + 11, PIP_Y + 3, 6, 14, fg);
+    canvas->fillRect(PIP_X + 23, PIP_Y + 3, 6, 14, fg);
+  } else {                                                        // resumed: play triangle
+    canvas->fillTriangle(PIP_X + 14, PIP_Y + 3, PIP_X + 14, PIP_Y + 17, PIP_X + 28, PIP_Y + 10, fg);
+  }
+  return true;
+}
+
 void loop() {
   if (gPowerOffReq) powerOff();   // deferred button long-press (flag-only in the button task); never returns
   // Battery: sample every 5s (readBatteryMv is 8 ADC reads, ~free). On a state change apply the
@@ -4864,7 +4904,9 @@ void loop() {
 #if defined(BOARD_WAVESHARE_128)
   if (gCarouselOpen) carouselOverlay();
 #endif
+  bool pipDrawn = clipPipDraw();          // saves the underlay when it draws
   uint32_t tFlush = micros();
   canvas->flush();
+  if (pipDrawn) clipPipRestore();         // canvas back to clean before the next render
   profTick(id, tFlush - tRender, micros() - tFlush);   // clear+render vs push-to-panel
 }
