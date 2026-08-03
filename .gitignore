@@ -8,3 +8,4 @@ __pycache__/
 references/
 # local research/reference notes — kept out of the public repo
 docs/
+build/
