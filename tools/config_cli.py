@@ -9,13 +9,15 @@ Usage:
   python3 tools/config_cli.py PORT slide-upload cat.jpg [index] [--fit|--cover]
     (default: images with transparency are scaled/centred to fit inside the round mask;
      opaque ones are cover-cropped. --fit/--cover force either way.)
+  python3 tools/config_cli.py PORT slide-set DIR_OR_FILE... [--fit|--cover]
+    (clears, then uploads the whole set in ONE session -- one reset instead of one per file)
   python3 tools/config_cli.py PORT slide-list
   python3 tools/config_cli.py PORT slide-clear
   python3 tools/config_cli.py PORT raw '{"cmd":"bat"}' ['{"cmd":"batsim","mv":3400}' ...]
     (multiple JSON args are sent in one session, pausing for Enter between sends --
      the CH343 board resets on port open, so state-dependent sequences must be one session)
 """
-import sys, json, time, base64
+import sys, json, time, base64, os, glob
 # serial (pyserial) imported lazily in main() so the pure converters (pack_rgb565 / img_to_rgb565)
 # are importable without pyserial -- e.g. tools/test_slide_convert.py under a bare python3.
 
@@ -152,18 +154,23 @@ def slide_upload(ser, path, index, fit=None, tries=3):
     """
     data = img_to_rgb565(path, fit)
     for attempt in range(tries):
-        r = rpc(ser, {"cmd": "slide_begin", "index": index})
-        if r.get("type") == "slide_ack":
-            for seq, off in enumerate(range(0, len(data), 1024)):
-                r = rpc(ser, {"cmd": "slide_chunk", "seq": seq,
-                              "data": base64.b64encode(data[off:off + 1024]).decode()})
-                if r.get("type") != "slide_ack":
-                    break
-            else:
-                r = rpc(ser, {"cmd": "slide_end"})
-                if r.get("type") == "slide_ack":
-                    return
+        try:
+            r = rpc(ser, {"cmd": "slide_begin", "index": index})
+            if r.get("type") == "slide_ack":
+                for seq, off in enumerate(range(0, len(data), 1024)):
+                    r = rpc(ser, {"cmd": "slide_chunk", "seq": seq,
+                                  "data": base64.b64encode(data[off:off + 1024]).decode()})
+                    if r.get("type") != "slide_ack":
+                        break
+                else:
+                    r = rpc(ser, {"cmd": "slide_end"})
+                    if r.get("type") == "slide_ack":
+                        return
+        except TimeoutError as e:
+            r = e            # rpc() gives up after its own retries; a lost reply restarts the
+                             # transfer like any other failure rather than killing a whole batch
         print(f"  upload attempt {attempt + 1}/{tries} failed ({r}), restarting", file=sys.stderr)
+        ser.reset_input_buffer()   # a late reply to the abandoned attempt would desync the next one
         time.sleep(0.5)
     sys.exit(f"slide upload failed after {tries} attempts: {r}")
 
@@ -210,6 +217,24 @@ def main():
     elif cmd == "slide-upload":
         idx = int(sys.argv[4]) if len(sys.argv) > 4 else len(rpc(ser, {"cmd": "slide_list"})["slides"])
         slide_upload(ser, sys.argv[3], idx, fit)
+        print(json.dumps(rpc(ser, {"cmd": "slide_list"}), indent=2))
+    elif cmd == "slide-set":
+        # A whole set in ONE session. main() resets the board on every open and the splash costs
+        # ~9.3s before it answers, so uploading N files as N invocations pays N resets -- and the
+        # panel freezes for each (loop() skips render while gSlideUploading). Clears first, so
+        # device index order == the order given here.
+        paths = []
+        for a in sys.argv[3:]:
+            paths += sorted(glob.glob(os.path.join(a, "*"))) if os.path.isdir(a) else [a]
+        paths = [p for p in paths if os.path.splitext(p)[1].lower()
+                 in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")]
+        if not paths:
+            sys.exit("slide-set: no images found")
+        if rpc(ser, {"cmd": "slide_clear"}).get("type") != "slide_ack":
+            sys.exit("slide-set: clear failed")
+        for i, p in enumerate(paths):
+            print(f"  [{i}] {os.path.basename(p)}", flush=True)
+            slide_upload(ser, p, i, fit)
         print(json.dumps(rpc(ser, {"cmd": "slide_list"}), indent=2))
     elif cmd == "slide-list":
         print(json.dumps(rpc(ser, {"cmd": "slide_list"}), indent=2))
