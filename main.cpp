@@ -1710,8 +1710,18 @@ void setup() {
   button.attachClick(singleClick); button.attachDoubleClick(doubleClick);
   button.attachMultiClick(multiClick); button.attachLongPressStart(powerOffRequest);
 
+  // Started BEFORE the splash: the splash blocks for ~8.9s, and with the task created after it the
+  // unit was wholly deaf for that whole window on every power-on -- no long-press power-off, no
+  // input at all. Safe to overlap because the task only polls (I2C touch / encoder / button pin)
+  // and every callback is flag-only, so it never touches the SPI the splash is driving. The flags
+  // it can latch here (gPowerOffReq, g_pendingAnim, gCarouselReq) are all consumed by loop() right
+  // after, so a press during the splash acts the moment it ends rather than being lost.
+  // ponytail: no abort flag -- that means the splash still runs to completion, it just isn't deaf.
+  xTaskCreate(buttonReadTask, "ButtonTask", 4096, NULL, 2, NULL);  // 4KB: touchPoll() runs Wire I2C in this task; the CST816S idle-NAK error path (Wire log_e -> vprintf) overflowed a 2KB stack -> canary panic in audio modes
+
   if (coldBoot && gConfig.nameBootSplash && !gConfig.name.empty()) {            // name reveal only on real power-on, not on every wake
-    const std::string& s = gConfig.bootSplashStyle;
+    std::string s = gConfig.bootSplashStyle;
+    if (s == "random") { static const char* kStyles[] = {"matrix", "slide", "bounce"}; s = kStyles[random(3)]; }
     (s == "slide" ? slideSplash : s == "bounce" ? bounceSplash : bootSplash)(gConfig.name);
     canvas->fillScreen(BLACK); canvas->flush();   // no splash style may leak into an animation that
                                                   // skips its first-frame clear (pipes/boids/GIF/...)
@@ -1719,7 +1729,6 @@ void setup() {
 
   uint32_t readyAt = millis();
   lastInteractionTime = readyAt; pauseStartTime = readyAt; stateEndTime = readyAt + 500; nextFrameTime = readyAt;
-  xTaskCreate(buttonReadTask, "ButtonTask", 4096, NULL, 2, NULL);  // 4KB: touchPoll() runs Wire I2C in this task; the CST816S idle-NAK error path (Wire log_e -> vprintf) overflowed a 2KB stack -> canary panic in audio modes
   Serial.printf("[boot] cpu %lu MHz\n", (unsigned long)getCpuFrequencyMhz());
 }
 
