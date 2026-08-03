@@ -6135,7 +6135,13 @@ async function teardown() {
 
 $("connect").onclick = async () => {
   try {
-    port = await navigator.serial.requestPort();
+    // ponytail: the picker can't be renamed (the ship board's "USB Single Serial" string
+    // belongs to its CH343 bridge, not the ESP32) — so filter instead. Ceiling: an ocellus on
+    // an undocumented bridge won't appear at all; add its VID:PID here if that ever happens.
+    port = await navigator.serial.requestPort({ filters: [
+      { usbVendorId: 0x1a86, usbProductId: 0x55d3 },  // CH343 — ship board
+      { usbVendorId: 0x303a },                        // Espressif native USB — bench, zero, C3
+    ]});
     await port.open({ baudRate: 115200 });
     reader = port.readable.getReader(); writer = port.writable.getWriter();
     readLoop();
