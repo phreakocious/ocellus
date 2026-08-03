@@ -6,7 +6,9 @@ Usage:
   python3 tools/config_cli.py PORT catalog
   python3 tools/config_cli.py PORT set '{"brightness": 80}'
   python3 tools/config_cli.py PORT selftest
-  python3 tools/config_cli.py PORT slide-upload cat.jpg [index]
+  python3 tools/config_cli.py PORT slide-upload cat.jpg [index] [--fit|--cover]
+    (default: images with transparency are scaled/centred to fit inside the round mask;
+     opaque ones are cover-cropped. --fit/--cover force either way.)
   python3 tools/config_cli.py PORT slide-list
   python3 tools/config_cli.py PORT slide-clear
   python3 tools/config_cli.py PORT raw '{"cmd":"bat"}' ['{"cmd":"batsim","mv":3400}' ...]
@@ -39,6 +41,40 @@ def rpc(ser, obj, attempts=3):
                 continue   # device log line ([prof]/[boot]/[espnow]), not a protocol reply -- keep reading
     raise TimeoutError("no response")
 
+def wait_ready(ser, timeout=20.0):
+    """Poll until the app actually answers, instead of sleeping a fixed guess.
+
+    pollConfigSerial() only runs once loop() does, so a freshly-reset unit is deaf for its whole
+    boot splash -- measured at ~9.3s, three times the 3.0s settle this replaced. rpc()'s retry
+    (3 x 3s) papered over that for get/set, but slide_begin landing in the deaf window aborted
+    uploads. Same lesson as flash.py's get_config(wait=...): probe, don't guess.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ser.reset_input_buffer()
+        ser.write(b'{"cmd":"get"}\n'); ser.flush()
+        end = time.time() + 1.0
+        while time.time() < end:
+            line = ser.readline().decode(errors="replace").strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue                      # [prof]/[boot] log line, not a protocol reply
+            if isinstance(d, dict) and "brightness" in d:
+                # The polls we sent while it was deaf sat in its 2048B RX ring and all get answered
+                # at once on wake, so N replies are queued behind this one. Leaving them there
+                # desyncs every later command (a slide_clear reads a stale config reply). Drain
+                # until 0.5s passes with no further JSON; [prof] lines arrive forever and must not
+                # keep resetting the timer, or this never returns.
+                quiet = time.time() + 0.5
+                while time.time() < quiet:
+                    if ser.readline().decode(errors="replace").strip().startswith("{"):
+                        quiet = time.time() + 0.5
+                return True
+    return False
+
 def pack_rgb565(rgba):
     """Pure: bytes-like RGBA (240*240*4) -> little-endian RGB565 bytes, round-cropped. Golden-tested."""
     out = bytearray(240 * 240 * 2); R = 120
@@ -53,25 +89,88 @@ def pack_rgb565(rgba):
             out[o] = v & 0xFF; out[o + 1] = (v >> 8) & 0xFF
     return bytes(out)
 
-def img_to_rgb565(path):
+def content_disc(alpha):
+    """Centre and radius of the opaque content: the smallest disc about the bbox centre that holds it.
+
+    Only each row's leftmost/rightmost opaque pixel can be the farthest from a horizontally-centred
+    point, so the scan breaks out of both ends instead of walking every pixel.
+    """
+    import math
+    bb = alpha.getbbox()
+    cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+    px = alpha.load(); best = 0.0
+    for y in range(bb[1], bb[3]):
+        for xl in range(bb[0], bb[2]):
+            if px[xl, y]: break
+        else: continue                                             # fully transparent row
+        for xr in range(bb[2] - 1, xl - 1, -1):
+            if px[xr, y]: break
+        for x in (xl, xr):
+            best = max(best, (x - cx) ** 2 + (y - cy) ** 2)
+    return cx, cy, math.sqrt(best) or 1.0
+
+def img_to_rgb565(path, fit=None):
+    """240x240 RGB565, round-cropped.
+
+    fit=False  cover-fit: fill the frame, let the round mask clip the corners. Right for photos.
+    fit=True   content-fit: centre on the opaque content and scale so its farthest pixel lands on
+               the mask edge -- nothing is clipped, and art that sits off-centre gets recentred.
+    fit=None   (default) content-fit when the image has any transparency, else cover-fit. A fully
+               opaque image gives no signal about what is background, so cropping it is the safer
+               guess; pass fit=True to shrink one inside the circle anyway.
+    """
     from PIL import Image
     im = Image.open(path).convert("RGBA")
-    s = max(240 / im.width, 240 / im.height)                       # cover-fit, centered
-    im = im.resize((round(im.width * s), round(im.height * s)))
-    left = (im.width - 240) // 2; top = (im.height - 240) // 2
-    im = im.crop((left, top, left + 240, top + 240))
-    return pack_rgb565(im.tobytes())
+    alpha = im.split()[3]
+    if fit is None:
+        fit = alpha.getextrema()[0] < 255
+    if fit:
+        cx, cy, rad = content_disc(alpha)
+        s = 120 / rad
+        r = im.resize((max(1, round(im.width * s)), max(1, round(im.height * s))))
+        # Pad with the image's own corner colour, not black: shrinking a white-background graphic
+        # inside the mask otherwise rings it in black. A transparent corner means the backdrop is
+        # meant to show through, so fall back to black there (and the mask blacks the corners anyway).
+        c = im.getpixel((0, 0))
+        out = Image.new("RGBA", (240, 240), (c[0], c[1], c[2], 255) if c[3] == 255 else (0, 0, 0, 255))
+        out.paste(r, (round(120 - cx * s), round(120 - cy * s)), r)
+    else:
+        s = max(240 / im.width, 240 / im.height)                   # cover-fit, centered
+        r = im.resize((round(im.width * s), round(im.height * s)))
+        left = (r.width - 240) // 2; top = (r.height - 240) // 2
+        out = r.crop((left, top, left + 240, top + 240))
+    return pack_rgb565(out.tobytes())
 
-def slide_upload(ser, path, index):
-    data = img_to_rgb565(path)
-    assert rpc(ser, {"cmd": "slide_begin", "index": index}).get("type") == "slide_ack"
-    for seq, off in enumerate(range(0, len(data), 1024)):
-        r = rpc(ser, {"cmd": "slide_chunk", "seq": seq, "data": base64.b64encode(data[off:off + 1024]).decode()})
-        assert r.get("type") == "slide_ack", r
-    assert rpc(ser, {"cmd": "slide_end"}).get("type") == "slide_ack"
+def slide_upload(ser, path, index, fit=None, tries=3):
+    """Retry the WHOLE transfer, never a single chunk.
+
+    Serial RX drops bytes during the framebuffer flush, so a chunk line can arrive mangled. But the
+    device tears the upload down on any chunk-level error (slide_proto's fail() -> abortTmp +
+    active=false), and re-sending a seq it already applied is itself a 'bad seq' abort -- so
+    resuming mid-stream can turn one dropped byte into a corrupt slide. slide_begin resets
+    nextSeq/got/active unconditionally, which makes restarting from the top always safe.
+    """
+    data = img_to_rgb565(path, fit)
+    for attempt in range(tries):
+        r = rpc(ser, {"cmd": "slide_begin", "index": index})
+        if r.get("type") == "slide_ack":
+            for seq, off in enumerate(range(0, len(data), 1024)):
+                r = rpc(ser, {"cmd": "slide_chunk", "seq": seq,
+                              "data": base64.b64encode(data[off:off + 1024]).decode()})
+                if r.get("type") != "slide_ack":
+                    break
+            else:
+                r = rpc(ser, {"cmd": "slide_end"})
+                if r.get("type") == "slide_ack":
+                    return
+        print(f"  upload attempt {attempt + 1}/{tries} failed ({r}), restarting", file=sys.stderr)
+        time.sleep(0.5)
+    sys.exit(f"slide upload failed after {tries} attempts: {r}")
 
 def main():
     import serial
+    fit = True if "--fit" in sys.argv else False if "--cover" in sys.argv else None
+    sys.argv = [a for a in sys.argv if a not in ("--fit", "--cover")]
     port, cmd = sys.argv[1], sys.argv[2]
     # CH343 board line-state facts, all measured on the bench (2026-07-16):
     #  - host->device bytes only flow with DTR asserted; both-deasserted is receive-only.
@@ -91,7 +190,8 @@ def main():
     ser.rts = True                 # EN low (chip held in reset); DTR deasserted keeps IO0 high
     time.sleep(0.1)
     ser.dtr = True                 # both asserted -> EN releases with IO0 high: clean app boot, TX enabled
-    time.sleep(3.0)                # reboot-to-setup(); cold-boot splash overrun is covered by rpc()'s retry
+    if not wait_ready(ser):        # reboot-to-setup(); the splash keeps it deaf for ~9.3s
+        sys.exit(f"{port}: no reply after reset -- port busy (config.html tab?) or not an ocellus")
     ser.reset_input_buffer()
     if cmd == "get":
         print(json.dumps(rpc(ser, {"cmd": "get"}), indent=2))
@@ -109,7 +209,7 @@ def main():
         print(f"OK: catalog={len(ids)} anims, set/get round-trip verified")
     elif cmd == "slide-upload":
         idx = int(sys.argv[4]) if len(sys.argv) > 4 else len(rpc(ser, {"cmd": "slide_list"})["slides"])
-        slide_upload(ser, sys.argv[3], idx)
+        slide_upload(ser, sys.argv[3], idx, fit)
         print(json.dumps(rpc(ser, {"cmd": "slide_list"}), indent=2))
     elif cmd == "slide-list":
         print(json.dumps(rpc(ser, {"cmd": "slide_list"}), indent=2))
