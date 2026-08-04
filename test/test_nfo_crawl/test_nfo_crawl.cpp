@@ -38,6 +38,27 @@ void test_inv_col_is_reciprocal_of_cell_width() {
   }
 }
 
+// vgaCellBit's 9th-column rule is "the rule that fails silently" -- a wrong range (e.g.
+// 0xB0..0xDF instead of 0xC0..0xDF) compiles clean and every other test still passes; it only
+// shows up as broken box joins on the panel. Pin it on the host instead.
+//
+// 0xCD is '=' (a horizontal double box rule): row bytes are 0x00 except rows 5 and 7, which are
+// 0xFF -- bit 0 (column 7, the one that gets replicated into column 8) is set on exactly those
+// two rows.
+void test_box_code_replicates_column_seven_into_column_eight() {
+  for (int r = 0; r < VGA_FONT_H; r++) {
+    bool expect = (r == 5 || r == 7);
+    TEST_ASSERT_EQUAL_INT(expect, vgaCellBit(0xCD, 8, r));
+  }
+}
+
+// 0x2A is '*', outside the 0xC0..0xDF join range, and its row 7 byte (0xFF) has bit 0 set --
+// so a range check widened to include 0x2A (or any code below 0xC0) would make column 8 light
+// up here. It must not: column 8 only ever exists for the box-drawing range.
+void test_non_box_code_never_gets_a_ninth_column() {
+  TEST_ASSERT_FALSE(vgaCellBit(0x2A, 8, 7));
+}
+
 void setUp() {} void tearDown() {}
 int main() {
   UNITY_BEGIN();
@@ -45,5 +66,7 @@ int main() {
   RUN_TEST(test_source_span_is_not_screen_height);
   RUN_TEST(test_traversal_uses_source_span);
   RUN_TEST(test_inv_col_is_reciprocal_of_cell_width);
+  RUN_TEST(test_box_code_replicates_column_seven_into_column_eight);
+  RUN_TEST(test_non_box_code_never_gets_a_ninth_column);
   return UNITY_END();
 }

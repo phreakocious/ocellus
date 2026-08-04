@@ -48,7 +48,17 @@ inline void nfoBuildTable(NfoRow out[NFO_SCREEN]) {
 // Total scroll distance for a pass: the text height plus the SOURCE span the screen covers,
 // which perspective makes ~197px -- not the 240px screen height. Getting this wrong makes
 // every duration wrong.
+//
+// Takes an already-built table so a caller with one in hand (the render path keeps gNfoTable
+// live for the whole mode) never pays for a second 240-entry float rebuild just to read this.
+inline int32_t nfoTraversal(const NfoRow* t, int lines) {
+  return lines * VGA_FONT_H + ((t[NFO_SCREEN-1].srcYQ8 - t[0].srcYQ8) >> 8);
+}
+
+// Convenience overload for callers with no table in hand (host tests, mostly). Builds a
+// throwaway table on the stack -- fine off the render path; use the (table, lines) overload
+// above anywhere a table already exists.
 inline int32_t nfoTraversal(int lines) {
   NfoRow t[NFO_SCREEN]; nfoBuildTable(t);
-  return lines * VGA_FONT_H + ((t[NFO_SCREEN-1].srcYQ8 - t[0].srcYQ8) >> 8);
+  return nfoTraversal(t, lines);
 }

@@ -41,6 +41,7 @@ inline void left(uint8_t* row, const char* s) { blank(row); put(row, 1, s); }
 
 // Fills `grid` and returns the number of lines written. Never writes more than maxLines.
 inline int nfoBuild(uint8_t grid[][NFO_COLS], int maxLines, uint32_t (*rng)(uint32_t)) {
+  if (maxLines <= 0) return 0;   // guards row()'s grid[maxLines-1] from going negative
   using namespace nfo_detail;
   int n = 0;
   auto row = [&]() -> uint8_t* { return grid[n < maxLines ? n : maxLines - 1]; };

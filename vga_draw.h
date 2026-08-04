@@ -25,17 +25,6 @@ inline void vgaBlit(Arduino_Canvas* c, char ch, int x, int y, int scale, uint16_
   }
 }
 
-// VGA_CELL_W (the 9-dot advance width) now lives in vga_font.h, included above -- moved there
-// so pure/host-side code can reach it without this file's Arduino_GFX_Library.h dependency.
-
-// Real VGA hardware in 9-dot mode duplicates column 8 into column 9 for codes 0xC0..0xDF and
-// blanks it for everything else. That rule is exactly what makes the box-drawing characters join
-// up, and synthesising it here is cheaper than storing a 9th bit per row (which would force the
-// font rows to uint16_t and break test_greetz's `const uint8_t*` glyph type).
-inline bool vgaCellBit(uint8_t code, int col, int row) {
-  if (code < VGA_FONT_FIRST || row < 0 || row >= VGA_FONT_H) return false;
-  const uint8_t bits = VGA_FONT[code - VGA_FONT_FIRST][row];
-  if (col == 8) return (code >= 0xC0 && code <= 0xDF) && (bits & 0x01);
-  if (col < 0 || col > 7) return false;
-  return (bits & (0x80 >> col)) != 0;
-}
+// VGA_CELL_W (the 9-dot advance width) and vgaCellBit (the 9-dot join rule) now live in
+// vga_font.h, included above -- moved there so pure/host-side code (nfo_crawl.h, and the host
+// test suite) can reach them without this file's Arduino_GFX_Library.h dependency.

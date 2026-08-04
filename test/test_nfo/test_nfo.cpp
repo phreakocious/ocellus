@@ -54,6 +54,14 @@ void test_every_name_fits_a_solo_row() {
     TEST_ASSERT_LESS_OR_EQUAL_INT(NFO_COLS - 2, (int)strlen(GREETZ_NAMES[i]) + 4);
 }
 
+// maxLines <= 0 must return 0 lines rather than let row()'s `grid[maxLines-1]` go negative
+// and write out of bounds. Nothing called nfoBuild with a non-positive bound until the crawl
+// renderer landed, so this guard has no caller to protect it from regressing silently.
+void test_zero_max_lines_returns_zero() {
+  uint8_t grid[NFO_MAX_LINES][NFO_COLS];
+  TEST_ASSERT_EQUAL_INT(0, nfoBuild(grid, 0, fakeRng));
+}
+
 void setUp() {} void tearDown() {}
 int main() {
   UNITY_BEGIN();
@@ -61,5 +69,6 @@ int main() {
   RUN_TEST(test_pair_predicate_accounts_for_brackets);
   RUN_TEST(test_line_count_within_bounds);
   RUN_TEST(test_every_name_fits_a_solo_row);
+  RUN_TEST(test_zero_max_lines_returns_zero);
   return UNITY_END();
 }

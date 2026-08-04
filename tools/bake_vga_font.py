@@ -120,7 +120,26 @@ def emit(glyphs):
         body = ",".join(f"0x{b:02X}" for b in rows)
         label = "space" if code == 32 else repr(bytes([code]).decode("cp437"))
         out.append(f"  {{{body}}},  // {code} {label}")
-    out += ["};", ""]
+    out += [
+        "};",
+        "",
+        "// Real VGA hardware in 9-dot mode duplicates column 8 into column 9 for codes 0xC0..0xDF",
+        "// and blanks it for everything else. That rule is exactly what makes the box-drawing",
+        "// characters join up, and synthesising it here is cheaper than storing a 9th bit per row",
+        "// (which would force the font rows to uint16_t and break test_greetz's `const uint8_t*`",
+        "// glyph type). Lives here, not in vga_draw.h, for the same reason as VGA_CELL_W above:",
+        "// vga_draw.h pulls in Arduino_GFX_Library.h, which would keep this out of the host test",
+        "// suite -- and a wrong range here compiles clean and only shows up as broken box joins",
+        "// on the panel.",
+        "inline bool vgaCellBit(uint8_t code, int col, int row) {",
+        "  if (code < VGA_FONT_FIRST || row < 0 || row >= VGA_FONT_H) return false;",
+        "  const uint8_t bits = VGA_FONT[code - VGA_FONT_FIRST][row];",
+        "  if (col == 8) return (code >= 0xC0 && code <= 0xDF) && (bits & 0x01);",
+        "  if (col < 0 || col > 7) return false;",
+        "  return (bits & (0x80 >> col)) != 0;",
+        "}",
+        "",
+    ]
     OUT.write_text("\n".join(out))
     print(f"wrote {OUT} -- {n} glyphs, {n * CELL_H} bytes")
 

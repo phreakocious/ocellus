@@ -32,6 +32,7 @@
 #include "greetz.h"
 #include "vga_font.h"
 #include "vga_draw.h"
+#include "nfo_crawl.h"   // pulls in nfo.h
 #if OCELLUS_AUDIO
 #include <WiFi.h>
 #include <esp_now.h>
@@ -2788,6 +2789,20 @@ static GreetzState gGreetzState;
 static int32_t     gGreetzOff  = 0;      // scroll offset in pixels
 static uint8_t     gGreetzPal  = 0;
 
+// --- .nfo crawl: the second rendering of id 47 -------------------------------------------
+static uint8_t  gNfoGrid[NFO_MAX_LINES][NFO_COLS];
+static int      gNfoLines   = 0;
+static int32_t  gNfoTotal   = 0;        // cached nfoTraversal(gNfoLines); see renderNfoCrawl
+static NfoRow   gNfoTable[NFO_SCREEN];
+static bool     gNfoMode    = true;     // false = marquee, true = crawl; greetzOnEnter flips this
+                                         // BEFORE choosing, so starting true makes entry #1 land
+                                         // on marquee (the crawl's own on-glass check assumes
+                                         // "marquee, then crawl", and a unit whose startup mode
+                                         // is 47 would otherwise always boot into the crawl).
+static uint32_t gNfoStartMs = 0;
+
+static constexpr int NFO_SPEED_PXS = 26;   // px/sec; millis()-driven, NOT per-frame
+
 static constexpr int GREETZ_CELL = VGA_FONT_W * 2 + 2;   // 8px glyph at 2x + the VGA 9th column (the letter-spacing) doubled
 static constexpr int GREETZ_SPEED  = 4;                 // px/frame (owner: "slightly faster"); loop ~83 s
 static constexpr int GREETZ_AMP    = 24;                // px of swing (owner: "a little wavier")
@@ -2873,11 +2888,68 @@ static void greetzOnEnter() {
     firstEntry = false;
   }
   greetzSeedStars();
-  greetzRebuild();
+  gNfoMode = !gNfoMode;               // session-only; alternates marquee / crawl per entry
+  if (gNfoMode) {                     // EXACTLY ONE builder runs -- greetzRebuild() also burns
+    nfoBuildTable(gNfoTable);         // 28 shuffle picks and advances the RiverDaddy/phosphor
+    gNfoLines   = nfoBuild(gNfoGrid, NFO_MAX_LINES, greetzRng);   // loop counter, so running both
+    gNfoTotal   = nfoTraversal(gNfoTable, gNfoLines);             // would desync the egg every entry
+    gNfoStartMs = millis();
+  } else {
+    greetzRebuild();
+  }
+}
+
+// The single-arg nfoTraversal(int) rebuilds a whole 240-entry projection table internally
+// (~3.8 KB of stack, 240 float divisions) just to read two numbers back -- fine for a host test,
+// not for a render path the C3's FPU-less build would have to run through in software every
+// frame. gNfoTotal caches the result of the (table, lines) overload against the gNfoTable that
+// already lives in RAM for the whole mode; it is recomputed only where gNfoLines changes
+// (greetzOnEnter above and the end-of-pass rebuild below), and never rebuilds the table.
+static void renderNfoCrawl(uint32_t now) {
+  const uint8_t* p = GREETZ_PAL[gGreetzPal];
+  greetzDrawStarfield();                         // same background as the marquee
+
+  // scroll is offset by -span (gNfoTable[NFO_SCREEN-1].srcYQ8>>8) so scroll==0 lines the last
+  // text row up with the bottom of the screen; gNfoTotal is a DISTANCE (textH + span), so the
+  // span has to be added back in before comparing the two, or the pass overruns by a full span
+  // (196px / ~7.5s at NFO_SPEED_PXS) of blank starfield before it resets.
+  int32_t scroll = ((int32_t)(now - gNfoStartMs) * NFO_SPEED_PXS) / 1000 - (gNfoTable[NFO_SCREEN-1].srcYQ8 >> 8);
+  if (scroll + (gNfoTable[NFO_SCREEN-1].srcYQ8 >> 8) >= gNfoTotal) {   // pass complete: advance the phosphor and rebuild
+    gGreetzPal  = (uint8_t)((gGreetzPal + 1) % 5);
+    gNfoLines   = nfoBuild(gNfoGrid, NFO_MAX_LINES, greetzRng);
+    gNfoTotal   = nfoTraversal(gNfoTable, gNfoLines);
+    gNfoStartMs = now;
+    return;
+  }
+
+  const int32_t textH = gNfoLines * VGA_FONT_H;
+  for (int y = 0; y < NFO_SCREEN; y++) {
+    const NfoRow& r = gNfoTable[y];
+    if (!r.bright) continue;
+    int32_t srcY = (r.srcYQ8 >> 8) + scroll;
+    if (srcY < 0 || srcY >= textH) continue;
+    const int  trow = srcY / VGA_FONT_H;
+    const int  gy   = srcY % VGA_FONT_H;
+    if (trow >= gNfoLines) continue;
+    const uint8_t* line = gNfoGrid[trow];
+
+    uint16_t col = gfx->color565((p[0] * r.bright) >> 8, (p[1] * r.bright) >> 8, (p[2] * r.bright) >> 8);
+    int x0 = 120 - (int)r.halfWidth, x1 = 120 + (int)r.halfWidth;
+    if (x0 < 0) x0 = 0;
+    if (x1 > NFO_SCREEN) x1 = NFO_SCREEN;
+    // Step the source column by the stored reciprocal -- no division in here.
+    int32_t srcQ16 = (int32_t)(x0 - (120 - (int)r.halfWidth)) * r.invColQ16;
+    for (int x = x0; x < x1; x++, srcQ16 += r.invColQ16) {
+      int ci = srcQ16 >> 16;
+      if (ci < 0 || ci >= NFO_COLS) continue;
+      int sub = ((srcQ16 & 0xFFFF) * VGA_CELL_W) >> 16;
+      if (vgaCellBit(line[ci], sub, gy)) canvas->drawPixel(x, y, col);
+    }
+  }
 }
 
 static void renderGreetz(uint32_t now) {
-  (void)now;
+  if (gNfoMode) { renderNfoCrawl(now); return; }
   const uint8_t* p = GREETZ_PAL[gGreetzPal];
   uint16_t col = gfx->color565(p[0], p[1], p[2]);
   greetzDrawStarfield();                  // behind the text; must run every frame, incl. the wrap frame below
