@@ -38,7 +38,8 @@ bool imuBegin() {
   wr(0x02, 0x40);   // CTRL1: address auto-increment, little-endian, internal osc on
   wr(0x03, 0x16);   // CTRL2 (accel, reg 0x03!): +/-4g, aODR=6 (125Hz)
   wr(0x04, 0x53);   // CTRL3 (gyro): +/-512dps, gODR ~=112Hz -- validated on the Waveshare board
-  wr(0x08, 0x03);   // CTRL7: enable accel (bit0) + gyro (bit1)
+  wr(0x08, 0x01);   // CTRL7: accel only (bit0); the gyro (~1mA) starts disabled -- onAnimEnter
+                    // enables it (imuGyroEnable) only for the modes that read it (Yin-Yang, Fluid, debug)
   delay(20);
   int16_t d; for (int i = 0; i < 3; i++) { imuReadAccel(&d, &d, &d); delay(10); }  // flush invalid startup samples
   return true;
@@ -55,6 +56,12 @@ bool imuReadAccel(int16_t* ax, int16_t* ay, int16_t* az) {
   *ay = (int16_t)(b[2] | (b[3] << 8));
   *az = (int16_t)(b[4] | (b[5] << 8));
   return true;
+}
+
+void imuGyroEnable(bool on) {
+  if (imuPresent) wr(0x08, on ? 0x03 : 0x01);   // CTRL7: accel always on (auto-flip), gyro bit per mode.
+  // First gyro samples after enable are spin-up zeros for ~100ms; both consumers integrate a rate,
+  // so a zero start is just "no impulse yet" -- no settling dance needed.
 }
 
 bool imuReadGyro(int16_t* gx, int16_t* gy, int16_t* gz) {

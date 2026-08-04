@@ -877,6 +877,7 @@ void onAnimEnter(uint8_t id) {
   clipHoldClear();   // a hold must never outlive its mode (esp. the global auto-cycle gate)
   gQrDirty = true;   // any mode entry invalidates the QR flush skip (the FB holds the prior mode's pixels)
   ensureRadio(isAudioMode(id));
+  imuGyroEnable(id == YINYANG_ID || id == FLUID_ID || id == DEBUG_ID);   // only modes that read gyro pay for it
 #if OCELLUS_AUDIO
   if (isAudioMode(id)) {                          // reset the duty-cycle timers to entry time so the
     uint32_t t = millis();                        // first listen window runs a full LISTEN_MS
