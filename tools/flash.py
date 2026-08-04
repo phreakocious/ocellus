@@ -161,10 +161,20 @@ def find_port(want_ch343):
     # fall back to the CH343 -- same bug mirrored.
     ch343 = set(ch343_ports())
     if want_ch343:
-        if ch343:
-            p = sorted(ch343)[0]
-            print(f"(CH343 board by VID:PID 1A86:55D3: {p})")
-            return p
+        # CH343s DO carry unique serials (e.g. 5AB0168801 vs 5AB0168012) -- print them, and with
+        # more than one board attached REFUSE instead of silently taking sorted()[0]: a two-puck
+        # desk once spent an afternoon flashing the wrong unit through exactly that silent pick.
+        infos = sorted((p.device, p.serial_number or "?")
+                       for p in list_ports.comports() if (p.vid, p.pid) == CH343_ID)
+        if len(infos) > 1:
+            print("multiple CH343 boards attached -- descriptor match is ambiguous, pass --port:")
+            for d, sn in infos:
+                print(f"  {d}  (serial {sn})")
+            return None
+        if infos:
+            d, sn = infos[0]
+            print(f"(CH343 board by VID:PID 1A86:55D3: {d}, serial {sn})")
+            return d
         return None
     for p in ports():
         if p in ch343:
