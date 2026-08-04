@@ -2801,7 +2801,7 @@ static bool     gNfoMode    = true;     // false = marquee, true = crawl; greetz
                                          // is 47 would otherwise always boot into the crawl).
 static uint32_t gNfoStartMs = 0;
 
-static constexpr int NFO_SPEED_PXS = 26;   // px/sec; millis()-driven, NOT per-frame
+static constexpr int NFO_SPEED_PXS = 32;   // px/sec; millis()-driven, NOT per-frame
 
 static constexpr int GREETZ_CELL = VGA_FONT_W * 2 + 2;   // 8px glyph at 2x + the VGA 9th column (the letter-spacing) doubled
 static constexpr int GREETZ_SPEED  = 4;                 // px/frame (owner: "slightly faster"); loop ~83 s
@@ -2889,11 +2889,11 @@ static void greetzOnEnter() {
   }
   greetzSeedStars();
   gNfoMode = !gNfoMode;               // session-only; alternates marquee / crawl per entry
-  if (gNfoMode) {                     // EXACTLY ONE builder runs -- greetzRebuild() also burns
-    nfoBuildTable(gNfoTable);         // 28 shuffle picks and advances the RiverDaddy/phosphor
-    gNfoLines   = nfoBuild(gNfoGrid, NFO_MAX_LINES, greetzRng);   // loop counter, so running both
-    gNfoTotal   = nfoTraversal(gNfoTable, gNfoLines);             // would desync the egg every entry
-    gNfoStartMs = millis();
+  if (gNfoMode) {                     // EXACTLY ONE builder runs -- both greetzRebuild() and
+    nfoBuildTable(gNfoTable);         // nfoBuild() draw from gGreetzState's bag and advance its
+    gNfoLines   = nfoBuild(gGreetzState, gNfoGrid, NFO_MAX_LINES, greetzRng);  // loops/swapAt
+    gNfoTotal   = nfoTraversal(gNfoTable, gNfoLines);   // RiverDaddy schedule, so alternating
+    gNfoStartMs = millis();                             // renderings share one egg clock.
   } else {
     greetzRebuild();
   }
@@ -2916,7 +2916,7 @@ static void renderNfoCrawl(uint32_t now) {
   int32_t scroll = ((int32_t)(now - gNfoStartMs) * NFO_SPEED_PXS) / 1000 - (gNfoTable[NFO_SCREEN-1].srcYQ8 >> 8);
   if (scroll + (gNfoTable[NFO_SCREEN-1].srcYQ8 >> 8) >= gNfoTotal) {   // pass complete: advance the phosphor and rebuild
     gGreetzPal  = (uint8_t)((gGreetzPal + 1) % 5);
-    gNfoLines   = nfoBuild(gNfoGrid, NFO_MAX_LINES, greetzRng);
+    gNfoLines   = nfoBuild(gGreetzState, gNfoGrid, NFO_MAX_LINES, greetzRng);
     gNfoTotal   = nfoTraversal(gNfoTable, gNfoLines);
     gNfoStartMs = now;
     return;

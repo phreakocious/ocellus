@@ -50,6 +50,18 @@ inline size_t greetzAppend(char* out, size_t cap, size_t len, const char* src) {
   return len;
 }
 
+// Advance the loop counter and the RiverDaddy schedule by exactly one loop; returns true if this
+// loop is a RIVERDADDY loop. Animation id 47 has TWO renderings (the marquee via greetzBuild and
+// the .nfo crawl via nfoBuild) that alternate and share one GreetzState, so this must live in one
+// place: duplicating the arithmetic let a change to one cadence silently skew the other, and each
+// builder's own tests would still pass in isolation.
+inline bool greetzAdvanceSchedule(GreetzState& s, uint32_t (*rng)(uint32_t)) {
+  s.loops++;
+  bool daddy = (s.loops == s.swapAt);
+  if (daddy) s.swapAt = s.loops + 3 + rng(3);     // next fire 3-5 loops out
+  return daddy;
+}
+
 // Assemble one loop's scroll string. Advances the loop counter and the RiverDaddy schedule.
 // Call this only at scroll wrap -- rebuilding mid-scroll would change text still on screen.
 inline size_t greetzBuild(GreetzState& s, char* out, size_t cap, uint32_t (*rng)(uint32_t)) {
@@ -57,9 +69,7 @@ inline size_t greetzBuild(GreetzState& s, char* out, size_t cap, uint32_t (*rng)
   out[0] = '\0';
   size_t len = 0;
 
-  s.loops++;
-  bool daddy = (s.loops == s.swapAt);
-  if (daddy) s.swapAt = s.loops + 3 + rng(3);     // next fire 3-5 loops out
+  bool daddy = greetzAdvanceSchedule(s, rng);
 
   for (int i = 0; i < GREETZ_PAD; i++) len = greetzAppend(out, cap, len, " ");
   len = greetzAppend(out, cap, len, GREETZ_HEADER);

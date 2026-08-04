@@ -12,9 +12,23 @@
 
 constexpr int NFO_COLS      = 32;
 constexpr int NFO_INNER     = NFO_COLS - 2;
-constexpr int NFO_PICKS     = 9;
-// 26 fixed lines + up to 9 bracket rows (nine picks, none pairing) = 35. 40 is headroom.
-constexpr int NFO_MAX_LINES = 40;
+// 30 fixed lines (incl. the RiverDaddy shout-out: 3 content rows plus a leading blank) + up to
+// GREETZ_NAME_COUNT - 2 bracket rows, none pairing, = 56. 60 is headroom.
+constexpr int NFO_MAX_LINES = 60;
+constexpr int NFO_FIXED_LINES = 30;
+// row()'s clamp is memory-SAFE but not content-safe: past the bound it repeatedly overwrites the
+// last row, so growing the roster would silently swallow the trailing block (cheers / memory /
+// beer / OVER AND OUT and the closing rule) with every existing test still green -- names are
+// emitted before those lines, and `n <= NFO_MAX_LINES` cannot tell "fits" from "was clamped".
+// Bound against the full count, not the emitted count, so it still holds if the filter changes.
+static_assert(NFO_MAX_LINES >= NFO_FIXED_LINES + GREETZ_NAME_COUNT,
+              "NFO_MAX_LINES too small for the roster -- the tail of the box would be dropped");
+
+// The release header credits these two by name, so the shuffled bracket list omits them --
+// otherwise each appears twice in the same box. Both the header rows and the omission are
+// built from these constants, so the credit and the filter cannot drift apart.
+inline const char* const NFO_SUPPLY  = "kitsune";
+inline const char* const NFO_CRACKED = "phreakocious";
 
 constexpr uint8_t NFO_TL = 0xC9, NFO_TR = 0xBB, NFO_BL = 0xC8, NFO_BR = 0xBC;
 constexpr uint8_t NFO_H  = 0xCD, NFO_V  = 0xBA, NFO_ML = 0xCC, NFO_MR = 0xB9;
@@ -40,20 +54,33 @@ inline void left(uint8_t* row, const char* s) { blank(row); put(row, 1, s); }
 }  // namespace nfo_detail
 
 // Fills `grid` and returns the number of lines written. Never writes more than maxLines.
-inline int nfoBuild(uint8_t grid[][NFO_COLS], int maxLines, uint32_t (*rng)(uint32_t)) {
+// Takes the SAME GreetzState the marquee (greetzBuild) uses -- s.bag and the s.loops/swapAt
+// RiverDaddy schedule are shared, so whichever rendering (marquee or crawl) greetzOnEnter
+// picks, the egg advances at one consistent rate instead of the crawl silently not counting.
+inline int nfoBuild(GreetzState& s, uint8_t grid[][NFO_COLS], int maxLines,
+                     uint32_t (*rng)(uint32_t)) {
   if (maxLines <= 0) return 0;   // guards row()'s grid[maxLines-1] from going negative
   using namespace nfo_detail;
   int n = 0;
   auto row = [&]() -> uint8_t* { return grid[n < maxLines ? n : maxLines - 1]; };
   auto adv = [&]() { if (n < maxLines) n++; };
 
+  // The SAME advance the marquee uses -- one shared helper, not a copy, so the two renderings
+  // of id 47 cannot drift apart on the egg's cadence.
+  bool daddy = greetzAdvanceSchedule(s, rng);
+
   rule(row(), NFO_TL, NFO_TR);                                     adv();
   centre(row(), "N E K O R A M E N G A N G");                      adv();
   centre(row(), "P R O U D L Y  P R E S E N T S");                 adv();
   rule(row(), NFO_ML, NFO_MR);                                     adv();
   left(row(), "Release : ocellus_v1.0-NRG");                       adv();
-  left(row(), "Supply  : kitsune");                                adv();
-  left(row(), "Cracked : phreakocious");                           adv();
+  {
+    char credit[NFO_COLS + 1];
+    snprintf(credit, sizeof credit, "Supply  : %s", NFO_SUPPLY);
+    left(row(), credit);                                           adv();
+    snprintf(credit, sizeof credit, "Cracked : %s", NFO_CRACKED);
+    left(row(), credit);                                           adv();
+  }
   centre(row(), "Date : 08/03/26  Type : GADGET");                 adv();
   rule(row(), NFO_ML, NFO_MR);                                     adv();
   centre(row(), "A W E S O M E   G R E E T Z");                    adv();
@@ -62,22 +89,49 @@ inline int nfoBuild(uint8_t grid[][NFO_COLS], int maxLines, uint32_t (*rng)(uint
   centre(row(), "eLiTe folks for their support:");                 adv();
   centre(row(), "");                                               adv();
 
-  // Bracket block: draw NFO_PICKS handles from the same bag the marquee uses, pack two-up
-  // where the predicate allows. Row count varies with the shuffle -- that is why the caller
-  // gets a length back instead of assuming one.
-  ShuffleBag bag; bag.n = 0; bag.last = -1;
-  const char* picks[NFO_PICKS];
-  for (int i = 0; i < NFO_PICKS; i++)
-    picks[i] = GREETZ_NAMES[shufflebagPick(bag, GREETZ_NAME_COUNT, rng)];
+  // Bracket block: draw EVERY handle from the same bag the marquee uses (s.bag, not a local
+  // bag), pack two-up where the predicate allows. Row count varies with the shuffle -- that is
+  // why the caller gets a length back instead of assuming one. All GREETZ_NAME_COUNT names
+  // appear, matching the marquee's "everyone once per loop" guarantee -- showing only a subset
+  // reads as a truncated greetz list to anyone who knows the crew.
+  // Draw EVERY handle even though two are not emitted: the bag is SHARED with the marquee, so
+  // drawing fewer than GREETZ_NAME_COUNT would leave it in a different state than greetzBuild
+  // leaves it and desynchronise the shuffle between the two renderings. Filter the emission,
+  // never the draw.
+  const char* picks[GREETZ_NAME_COUNT];
+  int np = 0;
+  for (int i = 0; i < GREETZ_NAME_COUNT; i++) {
+    const char* nm = GREETZ_NAMES[shufflebagPick(s.bag, GREETZ_NAME_COUNT, rng)];
+    if (strcmp(nm, NFO_SUPPLY) == 0 || strcmp(nm, NFO_CRACKED) == 0) continue;  // credited above
+    picks[np++] = nm;
+  }
 
   char buf[NFO_COLS + 1];
-  for (int i = 0; i < NFO_PICKS; ) {
-    if (i + 1 < NFO_PICKS && nfoPairFits(picks[i], picks[i + 1])) {
+  for (int i = 0; i < np; ) {
+    if (i + 1 < np && nfoPairFits(picks[i], picks[i + 1])) {
       snprintf(buf, sizeof buf, "[ %s ] [ %s ]", picks[i], picks[i + 1]); i += 2;
     } else {
       snprintf(buf, sizeof buf, "[ %s ]", picks[i]); i += 1;
     }
     centre(row(), buf); adv();
+  }
+
+  // RiverDaddy shout-out, wrapped to 3 rows -- greetz.h assembles GREETZ_SHOUT_PRE + name +
+  // GREETZ_SHOUT_POST into one ~50-char run for the marquee, which a 30-column interior can't
+  // hold on one line. The wrap text is DERIVED from those two constants (trimming the marquee's
+  // joiner whitespace) rather than hardcoded, so the two renderings can't drift apart in wording.
+  {
+    char shout[NFO_COLS + 1];
+    size_t preLen = strlen(GREETZ_SHOUT_PRE);
+    while (preLen > 0 && GREETZ_SHOUT_PRE[preLen - 1] == ' ') preLen--;   // drop the joiner space
+    snprintf(shout, sizeof shout, "%.*s", (int)preLen, GREETZ_SHOUT_PRE);
+    centre(row(), "");                                             adv();
+    centre(row(), shout);              /* "SPECIAL SHOUT OUT TO" */adv();
+    centre(row(), daddy ? "RIVERDADDY" : "RIVERSIDE");              adv();
+    const char* post = GREETZ_SHOUT_POST;
+    while (*post == ' ') post++;                                   // drop the joiner space,
+    snprintf(shout, sizeof shout, "%s", post);                     // keep the leading '&'
+    centre(row(), shout);              /* "& THE WALL OF SHEEP" */ adv();
   }
 
   centre(row(), "");                                               adv();
