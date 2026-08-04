@@ -40,6 +40,7 @@
 #include <esp_wifi.h>
 #endif
 #include "driver/ledc.h"   // backlight PWM on RTC8M (survives light sleep) -- see backlightBegin()
+#include "driver/uart.h"   // uart_set_wakeup_threshold: serial RX as a light-sleep wake (ship board; see setup)
 #include "esp_system.h"      // esp_reset_reason() --- boot diagnostics for the wake-from-sleep reboot
 #include "esp_sleep.h"       // esp_sleep_get_wakeup_cause()
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32
@@ -110,6 +111,11 @@ int readBatteryMv() { return 0; }             // no battery-sense divider on the
 static std::string g_rxbuf;
 static uint32_t gCfgSetMs = 0;   // last config `set` line: opens a render-hold window (see loop) so a
                                  // multi-part save's next lines aren't shredded by the flush/nap RX drops
+static uint32_t gHostRxMs = 0;   // last serial RX byte (or UART light-sleep wake on the ship board): a
+                                 // config host is talking, so the frame-gap nap stands down -- napping
+                                 // while a host talks is how a static mode went 12-sends-0-replies deaf
+static constexpr uint32_t HOST_WINDOW_MS = 60000;
+static inline bool hostActive() { return gHostRxMs && millis() - gHostRxMs < HOST_WINDOW_MS; }
 static volatile int g_pendingAnim = -1;   // pending mode jump (serial "anim" cmd or button task); applied in loop() so onAnimEnter/ensureRadio stay single-threaded
 static LittleFsSlideStore gSlideStore;
 static SlideUpload gSlideUp;
@@ -185,6 +191,7 @@ static const uint32_t CAROUSEL_HIDE_MS = 2000;
 static const uint32_t CAROUSEL_STUCK_MS = 30000;  // a single touch held this long is a wedged bus, not a gesture
 
 void pollConfigSerial() {
+  if (Serial.available()) gHostRxMs = millis();   // any RX byte re-arms the host window (see hostActive)
   while (Serial.available()) {
     char ch = Serial.read();
     if (ch == '\n') {
@@ -196,7 +203,8 @@ void pollConfigSerial() {
         g_rxbuf.clear(); continue;
       }
       if (g_rxbuf.find("\"bat\"") != std::string::npos) {   // {"cmd":"bat"} -> battery millivolts
-        Serial.printf("{\"type\":\"bat\",\"mv\":%d,\"usb\":%s}\n", readBatteryMv(), gBatt.usbPowered() ? "true" : "false");
+        Serial.printf("{\"type\":\"bat\",\"mv\":%d,\"usb\":%s,\"chg\":%s}\n", readBatteryMv(),
+                      gBatt.usbPowered() ? "true" : "false", gBatt.charging() ? "true" : "false");
         g_rxbuf.clear(); continue;
       }
       {   // {"cmd":"pet"} / {"cmd":"petsim","full":N,"en":N} -> read or force the pet stats
@@ -1140,6 +1148,7 @@ void powerOff() {
   // in the boot log. ext1 (button|touch, armed above) is the only wake deep sleep should honor.
   // Scoped to this board: the C3 path legitimately wakes deep sleep via its own GPIO source.
   if (touchPresent) esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_UART);   // armed in setup for the hostActive window; same stickiness checklist
 #endif
   // Hand the 8M oscillator back. backlightBegin() pins it ON so the backlight PWM survives LIGHT sleep,
   // but that pd setting is global -- left ON it would keep the oscillator burning through DEEP sleep too,
@@ -1715,6 +1724,17 @@ void setup() {
   Serial.setTxBufferSize(4096);  // tap lines are ~800B/frame at ~175pkt/s; the HWCDC default 256B would make drainTap block on USB flush mid-frame
   Serial.setRxBufferSize(2048);  // default HWCDC RX ring is 256B; full config `set` (~400-700B) overflows it between our once-per-frame drains, dropping the trailing '\n' so the line is silently lost. Match the g_rxbuf cap.
   Serial.begin(115200);
+#if defined(BOARD_WAVESHARE_128)
+  // Serial here is UART0 through the CH343 (ARDUINO_USB_CDC_ON_BOOT=0), and U0RXD/GPIO44 idles
+  // solid-high off the 3.3V rail (the same fact that killed idle-level USB sensing) -- so RX edges
+  // are a clean, spurious-free light-sleep wake source. The waking line itself arrives shredded
+  // (the UART is unclocked mid-nap); the point is the WAKE: it opens the hostActive() window, the
+  // nap stands down, and the host's retry lands whole -- every tool speaking this protocol already
+  // retries. Threshold 3 = the IDF minimum; any JSON byte clears it. Light-sleep-only source, but
+  // powerOff() disarms it anyway (wake sources are sticky -- house checklist).
+  uart_set_wakeup_threshold(UART_NUM_0, 3);
+  esp_sleep_enable_uart_wakeup(UART_NUM_0);
+#endif
   if (!LittleFS.begin(true))   // formatOnFail: first boot on a fresh partition formats it LittleFS
     Serial.println("[boot] WARN: LittleFS mount failed");
   else
@@ -4182,7 +4202,7 @@ void renderSensorDebug(uint32_t now) {
   int bmv = gBatSimMv ? gBatSimMv : readBatteryMv();   // what the monitor is actually fed (batsim-aware)
   static const char* BS[] = { "NORM", "LOW", "CUTOFF" };
   DBG_LINE(lo, "bat %4d ema %4d mV%s", bmv, gBatt.emaMv(), gBatSimMv ? " SIM" : "");
-  DBG_LINE(lo, "    %s  usb %s", BS[gBatt.state()], gBatt.usbPowered() ? "yes" : "no");
+  DBG_LINE(lo, "    %s  usb %s", BS[gBatt.state()], gBatt.usbPowered() ? (gBatt.charging() ? "chg" : "yes") : "no");
   const char* gname = "-";
   if (now - g_lastGestureMs < 1500) {
     TouchGesture t = (TouchGesture)g_lastGesture;
@@ -5092,13 +5112,18 @@ void loop() {
     // Radio-gated: ESP-NOW would drop packets across a sleep, and audio modes run uncapped anyway
     // (frameDelay 0), so this can only ever fire in the non-audio modes -- which is the 362-days-a-year case.
     uint32_t gap = nextFrameTime - now;
-    if (kLightSleepOk && !radioOn && gap > 3) {   // <=3ms isn't worth the wake latency
+    if (kLightSleepOk && !radioOn && gap > 3 && !hostActive()) {   // <=3ms isn't worth the wake latency;
+                                                  // a talking host makes naps eat RX bytes -- spin instead
       esp_sleep_enable_timer_wakeup((uint64_t)(gap - 1) * 1000ULL);   // -1ms: wake early, never late
       esp_light_sleep_start();                      // millis()/esp_timer stay correct across this
 #if defined(BOARD_WAVESHARE_128)
       // GPIO wake == the touch INT pulsed mid-nap (it's the only GPIO light-sleep source armed).
       // The falling-edge ISR can't fire during sleep, so hand the latch the pulse it missed.
-      if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) touchNoteInt();
+      esp_sleep_wakeup_cause_t wc = esp_sleep_get_wakeup_cause();
+      if (wc == ESP_SLEEP_WAKEUP_GPIO) touchNoteInt();
+      // UART wake == a host started talking mid-nap; its bytes are already lost (the UART is
+      // unclocked while asleep). Open the host window so the retry finds the loop awake.
+      if (wc == ESP_SLEEP_WAKEUP_UART) gHostRxMs = millis();
 #endif
     } else {
       delay(1);
