@@ -115,6 +115,9 @@ static LittleFsSlideStore gSlideStore;
 static SlideUpload gSlideUp;
 volatile bool gSlideUploading = false;   // true while a slide upload is mid-flight (loop skips render)
 volatile bool gSlidesDirty = true;       // set when slide set changes; renderSlideshow re-scans (Task 6)
+static bool gFbUnchanged = false;        // renderer proved this frame wrote nothing (slideshow dwell/fade,
+                                         // GIF frame not due, QR already painted) -> loop skips the ~14ms flush
+static bool gQrDirty = true;             // QR must repaint: mode entry, any config `set`, rotation change, splash
 static uint32_t gSlideRxMs = 0;          // last slide-command timestamp (upload watchdog)
 // GIF player (id GIF_ID). Same shape as the slide plumbing above, with one difference that drives
 // everything: clips are keyed by NAME, not index, because `flash.py --gifs SET` writes a whole set
@@ -233,7 +236,7 @@ void pollConfigSerial() {
       }
       // Even a corrupted set line usually keeps its head intact (drops hit the tail), so the
       // window opens for the retry too -- which is the attempt the hold exists to protect.
-      if (g_rxbuf.find("\"set\"") != std::string::npos) gCfgSetMs = millis();
+      if (g_rxbuf.find("\"set\"") != std::string::npos) { gCfgSetMs = millis(); gQrDirty = true; }   // any set may have replaced qrBits
       bool changed = false; int animSel = -1;
       std::string resp = handleLine(g_rxbuf, gConfig, changed, &animSel);
       if (changed) saveConfig(gConfig);
@@ -343,7 +346,7 @@ uint8_t gAppliedRot = 0;
 // Every setRotation goes through here. Screens that lock an orientation (the debug screens, Fluid) are
 // asking for one relative to the mount, not to the panel's native axes -- so the offset has to be added
 // at every site, not just in applyConfig().
-static inline void setPanelRotation(uint8_t r) { gAppliedRot = r; gfx->setRotation((r + kBaseRotation) & 3); }
+static inline void setPanelRotation(uint8_t r) { if (r != gAppliedRot) gQrDirty = true; gAppliedRot = r; gfx->setRotation((r + kBaseRotation) & 3); }
 
 // --- RTC MEMORY & MODES ---
 RTC_DATA_ATTR uint8_t currentAnimId = 0;   // flat registry id 0-55 (holes at 42-44); RTC so `resume` survives deep-sleep
@@ -872,6 +875,7 @@ static int moodPupilAim(int heldTarget) {
 // Re-init per-animation state when an animation becomes active.
 void onAnimEnter(uint8_t id) {
   clipHoldClear();   // a hold must never outlive its mode (esp. the global auto-cycle gate)
+  gQrDirty = true;   // any mode entry invalidates the QR flush skip (the FB holds the prior mode's pixels)
   ensureRadio(isAudioMode(id));
 #if OCELLUS_AUDIO
   if (isAudioMode(id)) {                          // reset the duty-cycle timers to entry time so the
@@ -1965,7 +1969,7 @@ void renderGif(uint32_t now) {
   }
   if (gGifCount == 0) { gifNote("No GIFs", "upload via config"); return; }
 
-  if (now < gGifNextFrameMs) return;             // not due yet; the framebuffer still holds the frame
+  if (now < gGifNextFrameMs) { gFbUnchanged = true; return; }   // not due yet; the framebuffer (and panel) still hold the frame
 
   int delayMs = 0;
   int rc = gGif->playFrame(false, &delayMs);     // false: we do our own pacing, never block the loop
@@ -2000,7 +2004,9 @@ static void loadSlideToFb(int i) {
 }
 
 void renderSlideshow(uint32_t now) {
+  gFbUnchanged = true;   // the slide LIVES in the framebuffer; only the paths below that write it clear this
   if (gSlidesDirty) {                                        // slide set changed (or first entry)
+    gFbUnchanged = false;
     SlideMeta m[SLIDE_MAX];
     gSlideCount = gSlideStore.list(m, SLIDE_MAX);
     if (gSlideIdx >= gSlideCount) gSlideIdx = 0;
@@ -2011,6 +2017,7 @@ void renderSlideshow(uint32_t now) {
     if (gSlideCount > 0) loadSlideToFb(gSlideIdx);
   }
   if (gSlideCount == 0) {                                    // empty state (this branch clears)
+    gFbUnchanged = false;   // ponytail: redraws+flushes every frame; nobody runs a battery unit on this screen
     canvas->fillScreen(BLACK);
     canvas->setTextColor(gfx->color565(130, 130, 130));
     canvas->setTextSize(2); canvas->setCursor(48, 104); canvas->print("No slides");
@@ -2029,6 +2036,7 @@ void renderSlideshow(uint32_t now) {
       if (gSlideStep <= 0) {
         gSlideIdx = (gSlideIdx + 1) % gSlideCount;
         loadSlideToFb(gSlideIdx);
+        gFbUnchanged = false;              // the one fade frame that swaps the resident slide
         gSlidePhase = 2; gSlideStep = 0;
       }
       break;
@@ -2046,6 +2054,9 @@ void renderSlideshow(uint32_t now) {
 // zone 2 modules (bump toward 4 if scanning proves flaky). Static frame; loop()'s fillScreen(BLACK)
 // leaves everything outside the white field dark.
 void renderQR() {
+  if (!gQrDirty) { gFbUnchanged = true; return; }   // static frame: repaint only on entry / set / rotation / splash
+  gQrDirty = false;
+  canvas->fillScreen(BLACK);   // owns its clear (QR_ID is in loop()'s no-clear list so the skip path holds the frame)
   int size = gConfig.qrSize;
   bool ok = size >= 21 && (int)gConfig.qrBits.size() >= ((size * size + 7) / 8) * 2;  // codec clamps size; short bits = truncated save
   if (!ok) {
@@ -4963,7 +4974,7 @@ void loop() {
       // The splash repaints everything, so the saved band is stale -- drop the strip rather
       // than paint 40 rows of stale pixels back over the splash.
       if (gCarouselOpen) { carouselBandFree(); gCarouselOpen = false; }
-      batterySplash(); gSlidesDirty = true;
+      batterySplash(); gSlidesDirty = true; gQrDirty = true;
     }
   }
 
@@ -5137,15 +5148,17 @@ void loop() {
 #if OCELLUS_AUDIO
   if (gSbActive) ensureSbWheel();            // debug 37/38 keep their own ramps
 #endif
+  gFbUnchanged = false;   // renderers with a provably-static frame set it (slideshow, GIF, QR)
   uint32_t tRender = micros();
 #if defined(BOARD_WAVESHARE_128)
   if (gCarouselOpen) carouselBandRestore();   // undo last frame's strip BEFORE the renderer runs
 #endif
   if (id == PIPES_ID || id == SLIDESHOW_ID || id == BOIDS_ID || id == SWIRL_ID || id == TREATCAT_ID ||
-      id == GIF_ID || (id >= ATLAS_BASE && id < ANIM_COUNT)) {
+      id == GIF_ID || id == QR_ID || (id >= ATLAS_BASE && id < ANIM_COUNT)) {
     // no clear: pipes accumulate; slideshow keeps its blitted slide resident (loaded on change
     // only); boids fades its own trail (fadeFrame) instead of hard-clearing; swirl's upscale
-    // writes every pixel; the GIF player needs frame persistence for disposal modes; the atlas
+    // writes every pixel; the GIF player needs frame persistence for disposal modes; QR clears
+    // itself on repaint and holds the frame otherwise (flush skip); the atlas
     // effects self-cover (blitUp writes every pixel; the draw effects fillScreen their own bg)
   } else {
     canvas->fillScreen(BLACK);
@@ -5174,8 +5187,16 @@ void loop() {
   if (gCarouselOpen) carouselOverlay();
 #endif
   bool pipDrawn = clipPipDraw();          // saves the underlay when it draws
+  // Static-frame flush skip: the renderer proved it wrote nothing and the panel self-refreshes from
+  // its own GRAM, so the ~14ms push would repaint identical pixels -- skip it and the frame-gap nap
+  // grows by that much. Overlays (carousel, PiP) always flush, and gPanelOverlay forces ONE more
+  // flush after an overlay's last frame: the canvas is restored post-flush, so panel != canvas
+  // until the next real push.
+  static bool gPanelOverlay = false;
+  bool overlay = pipDrawn || gCarouselOpen;
   uint32_t tFlush = micros();
-  canvas->flush();
+  if (!gFbUnchanged || overlay || gPanelOverlay) canvas->flush();
+  gPanelOverlay = overlay;
   if (pipDrawn) clipPipRestore();         // canvas back to clean before the next render
   profTick(id, tFlush - tRender, micros() - tFlush);   // clear+render vs push-to-panel
 }
