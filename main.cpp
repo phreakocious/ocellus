@@ -1002,12 +1002,14 @@ void buttonReadTask(void *pvParameters) {
         gCarouselReq = true;                    // flag-only; loop() builds the list and opens it
         lastInteractionTime = millis();
         break;
-      case TOUCH_SWIPE_RIGHT:                   // next enabled anim (mirrors singleClick)
+      // Swipe LEFT advances, matching Carousel::drag() (finger left = list forward) and every
+      // physical carousel: the content follows the finger, so the NEXT id comes in from the right.
+      case TOUCH_SWIPE_LEFT:                    // next enabled anim (mirrors singleClick)
         if (gCarouselOpen) break;               // the carousel owns the horizontal axis while it is up:
         g_pendingAnim = nextFavorite(gConfig.favoritesMask, animBase());   // a drag ends in a swipe on release,
         lastInteractionTime = millis();                                    // which would jump one step PAST the flick
         break;
-      case TOUCH_SWIPE_LEFT:                    // previous enabled anim
+      case TOUCH_SWIPE_RIGHT:                   // previous enabled anim
         if (gCarouselOpen) break;
         g_pendingAnim = prevFavorite(gConfig.favoritesMask, animBase());
         lastInteractionTime = millis();
