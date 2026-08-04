@@ -30,3 +30,21 @@ void treatsSave(uint32_t treats) {
   p.putUInt("treats", treats);
   p.end();
 }
+
+uint8_t resumeIdLoad() {
+  Preferences p;
+  p.begin("ocellus", true);
+  uint8_t id = p.getUChar("lastid", 0xFF);
+  p.end();
+  return id;
+}
+
+// Its own one-byte key rather than a Config field: saving through gConfig would rewrite the whole
+// config JSON (~400-700 B) on every pick, and drag the codec, the protocol and config.html along
+// for a value the user never sets by hand.
+void resumeIdSave(uint8_t id) {
+  Preferences p;
+  p.begin("ocellus", false);
+  p.putUChar("lastid", id);
+  p.end();
+}

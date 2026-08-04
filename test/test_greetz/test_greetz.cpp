@@ -54,7 +54,7 @@ void test_fixed_segments_present() {
   std::string out = buildOne(s);
   TEST_ASSERT_TRUE(out.find("NEKORAMENGANG (NRG)")        != std::string::npos);
   TEST_ASSERT_TRUE(out.find("IN LOVING MEMORY OF BIND")   != std::string::npos);
-  TEST_ASSERT_TRUE(out.find("BLAME THE BEER!")            != std::string::npos);
+  TEST_ASSERT_TRUE(out.find("AND ANYONE WE FORGOT!")      != std::string::npos);
   TEST_ASSERT_TRUE(out.find("OVER AND OUT ------>")       != std::string::npos);
   TEST_ASSERT_TRUE(out.find("THE WALL OF SHEEP")          != std::string::npos);
   // declined content must never appear
@@ -139,6 +139,39 @@ void test_font_covers_printable_ascii() {
   TEST_ASSERT_EQUAL_INT(224, VGA_FONT_LAST - VGA_FONT_FIRST + 1);
   TEST_ASSERT_EQUAL_INT(8,  VGA_FONT_W);
   TEST_ASSERT_EQUAL_INT(16, VGA_FONT_H);
+  TEST_ASSERT_EQUAL_INT(5,  VGA_MIP_W);
+  TEST_ASSERT_EQUAL_INT(8,  VGA_MIP_H);
+}
+
+// The far-field atlas is generated from 2x2 source-dot blocks. Every result is true coverage
+// (0..4), space remains empty, and CP437's synthetic ninth dot participates in the filter. The
+// last cases are the generator trap: row 5 is paired with blank row 4, so its joined ninth-dot
+// bucket must carry two horizontal samples (coverage 2, not 1); a solid block remains 4.
+void test_font_mip_is_bounded_and_preserves_box_joins() {
+  for (int c = VGA_FONT_FIRST; c <= VGA_FONT_LAST; c++)
+    for (int y = 0; y < VGA_FONT_H; y++)
+      for (int x = 0; x < VGA_CELL_W; x++)
+        TEST_ASSERT_LESS_OR_EQUAL_UINT8(4, vgaMipCoverage((uint8_t)c, x, y));
+
+  for (int y = 0; y < VGA_FONT_H; y++)
+    for (int x = 0; x < VGA_CELL_W; x++)
+      TEST_ASSERT_EQUAL_UINT8(0, vgaMipCoverage(' ', x, y));
+
+  TEST_ASSERT_EQUAL_UINT8(2, vgaMipCoverage(0xCD, 8, 5));  // joined double horizontal rule
+  TEST_ASSERT_EQUAL_UINT8(4, vgaMipCoverage(0xDB, 8, 5));  // joined full block
+  TEST_ASSERT_EQUAL_UINT8(0, vgaMipCoverage('*',  8, 7));  // ordinary glyph has no ninth dot
+}
+
+// The crawl's hot path expands a whole character row once and then mask-tests it. Keep that packed
+// representation exactly equivalent to vgaCellBit for every baked glyph, row, and ninth-dot case.
+void test_packed_cell_rows_match_individual_dot_lookup() {
+  for (int c = VGA_FONT_FIRST; c <= VGA_FONT_LAST; c++)
+    for (int y = 0; y < VGA_FONT_H; y++) {
+      uint16_t packed = vgaCellRowBits((uint8_t)c, y);
+      TEST_ASSERT_EQUAL_HEX16_MESSAGE(0, packed & 0xFE00, "packed row escaped its nine-dot cell");
+      for (int x = 0; x < VGA_CELL_W; x++)
+        TEST_ASSERT_EQUAL_INT(vgaCellBit((uint8_t)c, x, y), (packed & (1u << (8 - x))) != 0);
+    }
 }
 
 // 0xC9 is CP437 double-corner. Baked through the Unicode cmap without a CP437 map it
@@ -230,6 +263,8 @@ int main(int, char**) {
   RUN_TEST(test_all_content_chars_are_printable_ascii);
   RUN_TEST(test_small_buffer_truncates_safely);
   RUN_TEST(test_font_covers_printable_ascii);
+  RUN_TEST(test_font_mip_is_bounded_and_preserves_box_joins);
+  RUN_TEST(test_packed_cell_rows_match_individual_dot_lookup);
   RUN_TEST(test_cp437_box_corner_not_latin1);
   RUN_TEST(test_only_space_is_blank);
   RUN_TEST(test_bit_order_is_msb_first);

@@ -345,7 +345,28 @@ uint8_t gAppliedRot = 0;
 static inline void setPanelRotation(uint8_t r) { gAppliedRot = r; gfx->setRotation((r + kBaseRotation) & 3); }
 
 // --- RTC MEMORY & MODES ---
-RTC_DATA_ATTR uint8_t currentAnimId = 0;   // flat registry id 0-40 (incl. debug); RTC so `resume` survives deep-sleep
+RTC_DATA_ATTR uint8_t currentAnimId = 0;   // flat registry id 0-55 (holes at 42-44); RTC so `resume` survives deep-sleep
+
+// RTC_DATA_ATTR survives deep sleep and NOTHING else: the bootloader reloads .rtc.data on a RESET
+// press, an unplug, or the hard reset that ends a flash, so `resume` restarted at eye 0 every time
+// the board was reset rather than woken. Deliberate picks are mirrored into NVS as well.
+//
+// Only picks that arrive through g_pendingAnim count -- button, encoder, carousel, serial `anim`.
+// The auto-cycler writes currentAnimId directly and is deliberately NOT persisted: "resume where I
+// left it" means where the *user* left it, and a write per cycleSec hop is real flash wear
+// (cycleSec=30 would be ~500k writes a year on a one-byte key).
+static uint8_t  gResumeSaved   = 0xFF;   // what NVS already holds -- never rewrite the same id
+static uint8_t  gResumePending = 0xFF;   // id waiting out the debounce; 0xFF = nothing armed
+static uint32_t gResumeAt      = 0;      // millis() deadline for the pending write
+static const uint32_t RESUME_SAVE_MS = 10000;   // one write per settled pick, not per carousel step
+
+// Commit a settled pick. The NVS commit costs a few ms, so it runs at most once per RESUME_SAVE_MS
+// and only when the value actually changed: one hitched frame, ten seconds after you stop paging.
+static void resumeFlush() {
+  if (gResumePending == 0xFF) return;
+  if (gResumePending != gResumeSaved) { resumeIdSave(gResumePending); gResumeSaved = gResumePending; }
+  gResumePending = 0xFF;
+}
 
 // The base a queued anim change should step from: the outstanding pending value if there is one,
 // else the live id. loop() writes currentAnimId before clearing g_pendingAnim, so a negative pending
@@ -1058,6 +1079,8 @@ static uint8_t effectiveBrightness() {
 // the flush is ~14ms of a ~32ms frame, so it was a ~44% dice roll per press). The button long-press
 // therefore latches gPowerOffReq and loop() calls this at its top.
 void powerOff() {
+  resumeFlush();   // a pick made <RESUME_SAVE_MS before power-off would otherwise live only in RTC,
+                   // which survives this sleep but not the battery running flat while asleep
   Serial.println("[sleep] deep-sleep entered"); Serial.flush();  // observable marker for tools/touchwake_test.py
   gfx->displayOff(); backlightSet(0);
   while (digitalRead(BUTTON_PIN) == LOW) { delay(10); }
@@ -1713,8 +1736,14 @@ void setup() {
 
   loadConfig(gConfig);
   initSinLUT();
-  if (!isPlayableId(currentAnimId)) currentAnimId = 0;   // guard RTC garbage / reserved holes on cold boot
-  currentAnimId = resolveStartupId(gConfig.startupMode, gConfig.startupId, currentAnimId,
+  // On a cold boot .rtc.data was reloaded, so currentAnimId is back to its initializer and NVS is
+  // the ONLY resume source -- pass what it holds, including the 0xFF blank-NVS sentinel, which
+  // resolveStartupId reads as "nothing to resume" and answers with startupId (Greetz by default).
+  // On a deep-sleep wake RTC is the truth and may be NEWER than NVS, since a pick made inside the
+  // debounce window never got written. resolveStartupId clamps both, so no guard is needed here.
+  gResumeSaved = resumeIdLoad();
+  uint8_t resumeId = coldBoot ? gResumeSaved : currentAnimId;
+  currentAnimId = resolveStartupId(gConfig.startupMode, gConfig.startupId, resumeId,
                                    ANIMS[random(PLAYABLE_ENTRY_COUNT)].id);   // pick from real entries -- id space has holes
   onAnimEnter(currentAnimId);   // radio init (audio modes) now runs with the panel already black
 
@@ -2801,7 +2830,15 @@ static bool     gNfoMode    = true;     // false = marquee, true = crawl; greetz
                                          // is 47 would otherwise always boot into the crawl).
 static uint32_t gNfoStartMs = 0;
 
-static constexpr int NFO_SPEED_PXS = 32;   // px/sec; millis()-driven, NOT per-frame
+// px/sec; millis()-driven, NOT per-frame. Dropped from 32 after the .nfo content overhaul: the box
+// is the same height (46 rows vs 45, ~29 s at the old speed) but far denser to read -- comma runs
+// carry three handles per row where the old bracket rows carried two, and the release block is
+// seven tight label rows. Same distance, more words, so the pass wants longer. 24 -> ~39 s.
+static constexpr int NFO_SPEED_PXS = 24;
+// Film-rate is a feature here, not a compromise: the crawl is time-driven, and its baked coverage
+// mip removes the stepping that would otherwise expose a lower refresh. Capping this rendering at
+// 24 Hz drops one fifth of the expensive full-panel flushes while leaving a larger light-sleep gap.
+static constexpr int NFO_MAX_FPS = 24;
 
 static constexpr int GREETZ_CELL = VGA_FONT_W * 2 + 2;   // 8px glyph at 2x + the VGA 9th column (the letter-spacing) doubled
 static constexpr int GREETZ_SPEED  = 4;                 // px/frame (owner: "slightly faster"); loop ~83 s
@@ -2832,12 +2869,15 @@ static void greetzRebuild() {
 // the slow far-layer stars still drift smoothly without float in the loop.
 struct GreetzStar { int32_t x, y; uint8_t spd; uint8_t sz; uint8_t bright; };
 struct GreetzShot { int32_t x, y, vx, vy; uint8_t life, max; };
+struct NfoStar    { int16_t dx, dy; uint16_t r, speed; };
 
 static constexpr int GREETZ_STARS = 35;
 static constexpr int GREETZ_SHOTS = 2;
 static GreetzStar gGreetzStar[GREETZ_STARS];
 static GreetzShot gGreetzShot[GREETZ_SHOTS];
+static NfoStar    gNfoStar[GREETZ_STARS];
 static uint8_t    gGreetzShotN = 0;
+static uint32_t   gNfoStarMs = 0;
 
 static void greetzSeedStars() {
   for (int i = 0; i < GREETZ_STARS; i++) {
@@ -2880,6 +2920,49 @@ static void greetzDrawStarfield() {
   }
 }
 
+// Crawl-only starfield: the same 35-object budget as the marquee, but every star radiates from the
+// crawl's horizon instead of drifting sideways. `r` is a Q16 interpolation from (120,0) to a random
+// point on the screen; dr/dt = speed+r gives the old tunnel-demo acceleration curve with integer
+// maths only. Near stars get a short radial tail, still only a few dozen pixels across the frame.
+static void nfoResetStar(NfoStar& s, bool scattered) {
+  s.dx = (int16_t)(random(NFO_SCREEN) - NFO_SCREEN / 2);
+  s.dy = (int16_t)(40 + random(NFO_SCREEN - 40));
+  s.r = scattered ? (uint16_t)random(65536) : (uint16_t)random(2048);
+  s.speed = (uint16_t)(6500 + random(4500));
+}
+
+static void nfoSeedStars() {
+  for (int i = 0; i < GREETZ_STARS; i++) nfoResetStar(gNfoStar[i], true);
+  gNfoStarMs = millis();
+  gGreetzShotN = 0;                         // the marquee's shooting stars do not cross projections
+}
+
+static void nfoDrawStarfield(uint32_t now) {
+  uint32_t dt = now - gNfoStarMs;
+  if (dt > 80) dt = 80;                     // a serial/config stall must not teleport the whole field
+  gNfoStarMs = now;
+  for (int i = 0; i < GREETZ_STARS; i++) {
+    NfoStar& s = gNfoStar[i];
+    uint32_t oldR = s.r;
+    uint32_t next = oldR + ((uint32_t)(s.speed + oldR) * dt) / 1000;
+    if (next >= 65535) { nfoResetStar(s, false); oldR = s.r; next = s.r; }
+    s.r = (uint16_t)next;
+
+    int x = NFO_SCREEN / 2 + ((int32_t)s.dx * s.r >> 16);
+    int y = ((int32_t)s.dy * s.r >> 16);
+    int a = 58 + (s.r >> 9);                 // 58..185: far dust to near pinprick
+    uint16_t head = gfx->color565((210 * a) >> 8, (245 * a) >> 8, a);
+    if (s.r > 50000 && oldR < s.r) {
+      int ox = NFO_SCREEN / 2 + ((int32_t)s.dx * oldR >> 16);
+      int oy = ((int32_t)s.dy * oldR >> 16);
+      uint16_t tail = gfx->color565((105 * a) >> 8, (122 * a) >> 8, a >> 1);
+      canvas->drawLine(ox, oy, x, y, tail);
+    }
+    int sz = s.r > 56000 ? 2 : 1;
+    canvas->fillRect(x, y, sz, sz, head);
+  }
+}
+
 static void greetzOnEnter() {
   static bool firstEntry = true;
   if (firstEntry) {                       // loops/swapAt/palette persist across re-entry so the
@@ -2887,14 +2970,15 @@ static void greetzOnEnter() {
     gGreetzPal = 0;                       // cycle stay reachable on a button-cycled unit.
     firstEntry = false;
   }
-  greetzSeedStars();
   gNfoMode = !gNfoMode;               // session-only; alternates marquee / crawl per entry
   if (gNfoMode) {                     // EXACTLY ONE builder runs -- both greetzRebuild() and
+    nfoSeedStars();
     nfoBuildTable(gNfoTable);         // nfoBuild() draw from gGreetzState's bag and advance its
     gNfoLines   = nfoBuild(gGreetzState, gNfoGrid, NFO_MAX_LINES, greetzRng);  // loops/swapAt
     gNfoTotal   = nfoTraversal(gNfoTable, gNfoLines);   // RiverDaddy schedule, so alternating
     gNfoStartMs = millis();                             // renderings share one egg clock.
   } else {
+    greetzSeedStars();
     greetzRebuild();
   }
 }
@@ -2905,16 +2989,48 @@ static void greetzOnEnter() {
 // frame. gNfoTotal caches the result of the (table, lines) overload against the gNfoTable that
 // already lives in RAM for the whole mode; it is recomputed only where gNfoLines changes
 // (greetzOnEnter above and the end-of-pass rebuild below), and never rebuilds the table.
+//
+// `nfoCopperColor` is the crawl's copper list: one integer colour calculation per scanline buys a
+// slow white-hot raster glint and a mild near-edge lift. The target white is itself brightness-
+// limited, so neither effect can punch through the horizon fade or erase the CRT scanlines.
+static uint16_t nfoCopperColor(const uint8_t* p, uint8_t bright, int y, int glintY) {
+  int rr = (p[0] * bright) >> 8;
+  int gg = (p[1] * bright) >> 8;
+  int bb = (p[2] * bright) >> 8;
+  int near = y > 160 ? (y - 160) * 24 / 79 : 0;       // 0..24 toward the viewer
+  int d = abs(y - glintY);
+  int glint = d < 14 ? (14 - d) * 3 : 0;              // narrow 0..42 raster highlight
+  int mix = near + glint;
+  if (mix > 60) mix = 60;
+  int white = bright + (glint * (255 - bright) >> 6); // let the bar lift dim scanlines a little
+  if (white > 255) white = 255;
+  rr += (white - rr) * mix / 255;
+  gg += (white - gg) * mix / 255;
+  bb += (white - bb) * mix / 255;
+  return gfx->color565(rr, gg, bb);
+}
+
+// Ordered 4x4 coverage: mip interpolation produces 0..16 quarters of a fully covered output dot.
+// A fixed screen-space threshold turns that into a stable stipple instead of lighting every partial
+// texel at full strength (the equal-weight OR sampler's thick/fuzzy failure mode).
+static constexpr uint8_t NFO_BAYER4[16] = {
+   0,  8,  2, 10,
+  12,  4, 14,  6,
+   3, 11,  1,  9,
+  15,  7, 13,  5,
+};
+
 static void renderNfoCrawl(uint32_t now) {
   const uint8_t* p = GREETZ_PAL[gGreetzPal];
-  greetzDrawStarfield();                         // same background as the marquee
+  nfoDrawStarfield(now);                         // same object budget, now sharing the crawl horizon
 
-  // scroll is offset by -span (gNfoTable[NFO_SCREEN-1].srcYQ8>>8) so scroll==0 lines the last
-  // text row up with the bottom of the screen; gNfoTotal is a DISTANCE (textH + span), so the
-  // span has to be added back in before comparing the two, or the pass overruns by a full span
-  // (196px / ~7.5s at NFO_SPEED_PXS) of blank starfield before it resets.
-  int32_t scroll = ((int32_t)(now - gNfoStartMs) * NFO_SPEED_PXS) / 1000 - (gNfoTable[NFO_SCREEN-1].srcYQ8 >> 8);
-  if (scroll + (gNfoTable[NFO_SCREEN-1].srcYQ8 >> 8) >= gNfoTotal) {   // pass complete: advance the phosphor and rebuild
+  // Keep scroll fractional all the way into the far-field mip. At the mode-local 24 Hz cap the
+  // nominal motion is one full source pixel per frame, but perspective contributes another
+  // fractional phase per screen row; mip-row interpolation converts that into ordered coverage
+  // instead of a one-row pop. The traversal comparison stays in the same Q8 domain.
+  const int32_t spanQ8 = gNfoTable[NFO_SCREEN - 1].srcYQ8;
+  int32_t scrollQ8 = ((int32_t)(now - gNfoStartMs) * NFO_SPEED_PXS * 256) / 1000 - spanQ8;
+  if (scrollQ8 + spanQ8 >= (gNfoTotal << 8)) {       // pass complete: advance phosphor and rebuild
     gGreetzPal  = (uint8_t)((gGreetzPal + 1) % 5);
     gNfoLines   = nfoBuild(gGreetzState, gNfoGrid, NFO_MAX_LINES, greetzRng);
     gNfoTotal   = nfoTraversal(gNfoTable, gNfoLines);
@@ -2923,27 +3039,71 @@ static void renderNfoCrawl(uint32_t now) {
   }
 
   const int32_t textH = gNfoLines * VGA_FONT_H;
+  const int32_t textHQ8 = textH << 8;
+  const int textMipH = gNfoLines * VGA_MIP_H;
+  uint16_t* fb = canvas->getFramebuffer();             // coordinates below are clipped before use
+  uint16_t rowBits[NFO_COLS];                           // reused scanline scratch, 64 B each
+  uint16_t rowMip1[NFO_COLS];
+
+  // About one seven-second round trip. This is a literal raster bar: screen-Y driven, independent
+  // of the text, like a copper-list highlight on an old display controller.
+  int glintPhase = (int)((now / 24) % 300);
+  if (glintPhase > 150) glintPhase = 300 - glintPhase;
+  int glintY = 70 + glintPhase;
+  int centre = NFO_SCREEN / 2 + fastSin((int16_t)(now / 32)) / 96;  // subtle ±1px gate weave
+
   for (int y = 0; y < NFO_SCREEN; y++) {
     const NfoRow& r = gNfoTable[y];
     if (!r.bright) continue;
-    int32_t srcY = (r.srcYQ8 >> 8) + scroll;
-    if (srcY < 0 || srcY >= textH) continue;
-    const int  trow = srcY / VGA_FONT_H;
-    const int  gy   = srcY % VGA_FONT_H;
-    if (trow >= gNfoLines) continue;
-    const uint8_t* line = gNfoGrid[trow];
+    int32_t srcYQ8 = r.srcYQ8 + scrollQ8;
+    if (srcYQ8 < 0 || srcYQ8 >= textHQ8) continue;
 
-    uint16_t col = gfx->color565((p[0] * r.bright) >> 8, (p[1] * r.bright) >> 8, (p[2] * r.bright) >> 8);
-    int x0 = 120 - (int)r.halfWidth, x1 = 120 + (int)r.halfWidth;
+    uint16_t col = nfoCopperColor(p, r.bright, y, glintY);
+    int x0 = centre - (int)r.halfWidth, x1 = centre + (int)r.halfWidth;
     if (x0 < 0) x0 = 0;
     if (x1 > NFO_SCREEN) x1 = NFO_SCREEN;
     // Step the source column by the stored reciprocal -- no division in here.
-    int32_t srcQ16 = (int32_t)(x0 - (120 - (int)r.halfWidth)) * r.invColQ16;
-    for (int x = x0; x < x1; x++, srcQ16 += r.invColQ16) {
-      int ci = srcQ16 >> 16;
-      if (ci < 0 || ci >= NFO_COLS) continue;
-      int sub = ((srcQ16 & 0xFFFF) * VGA_CELL_W) >> 16;
-      if (vgaCellBit(line[ci], sub, gy)) canvas->drawPixel(x, y, col);
+    int32_t srcQ16 = (int32_t)(x0 - (centre - (int)r.halfWidth)) * r.invColQ16;
+    uint16_t* dst = fb + (size_t)y * NFO_SCREEN;
+
+    if (r.mip) {
+      // Source Y in the half-resolution atlas, still Q8. Resolve both neighbouring mip rows once;
+      // only their packed coverage lookups remain in the pixel loop. Crossing a 16px text-row
+      // boundary naturally moves line1 into the next NFO grid row.
+      int32_t mipYQ8 = srcYQ8 >> 1;
+      int my0 = mipYQ8 >> 8;
+      int my1 = my0 + 1 < textMipH ? my0 + 1 : my0;
+      uint8_t frac = (uint8_t)mipYQ8;
+      const uint8_t* line0 = gNfoGrid[my0 / VGA_MIP_H];
+      const uint8_t* line1 = gNfoGrid[my1 / VGA_MIP_H];
+      int gy0 = (my0 % VGA_MIP_H) * 2;
+      int gy1 = (my1 % VGA_MIP_H) * 2;
+      for (int ci = 0; ci < NFO_COLS; ci++) {
+        uint8_t c0 = line0[ci], c1 = line1[ci];
+        rowBits[ci] = c0 >= VGA_FONT_FIRST ? VGA_FONT_MIP[c0 - VGA_FONT_FIRST][gy0 >> 1] : 0;
+        rowMip1[ci] = c1 >= VGA_FONT_FIRST ? VGA_FONT_MIP[c1 - VGA_FONT_FIRST][gy1 >> 1] : 0;
+      }
+      for (int x = x0; x < x1; x++, srcQ16 += r.invColQ16) {
+        int ci = srcQ16 >> 16;
+        if (ci < 0 || ci >= NFO_COLS) continue;
+        int sub = ((srcQ16 & 0xFFFF) * VGA_CELL_W) >> 16;
+        int shift = (sub >> 1) * 3;
+        int c0 = (rowBits[ci] >> shift) & 0x07;
+        int c1 = (rowMip1[ci] >> shift) & 0x07;
+        int cov16 = (c0 * (256 - frac) + c1 * frac + 32) >> 6; // 0..16
+        if (cov16 > NFO_BAYER4[((y & 3) << 2) | (x & 3)]) dst[x] = col;
+      }
+    } else {
+      int srcY = srcYQ8 >> 8;
+      const uint8_t* line = gNfoGrid[srcY / VGA_FONT_H];
+      int gy = srcY % VGA_FONT_H;
+      for (int ci = 0; ci < NFO_COLS; ci++) rowBits[ci] = vgaCellRowBits(line[ci], gy);
+      for (int x = x0; x < x1; x++, srcQ16 += r.invColQ16) {
+        int ci = srcQ16 >> 16;
+        if (ci < 0 || ci >= NFO_COLS) continue;
+        int sub = ((srcQ16 & 0xFFFF) * VGA_CELL_W) >> 16;
+        if (rowBits[ci] & (1u << (8 - sub))) dst[x] = col; // direct RAM write, already clipped
+      }
     }
   }
 }
@@ -4884,7 +5044,10 @@ void loop() {
     onAnimEnter(currentAnimId);      // and anything the button task queues during it must survive
     lastInteractionTime = millis();
     gLastCycle = millis();           // a manual pick gets its full cycleSec window before the auto-cycler moves on
+    gResumePending = currentAnimId;  // deliberate pick -> persist it, once it settles
+    gResumeAt = lastInteractionTime + RESUME_SAVE_MS;
   }
+  if (gResumePending != 0xFF && (int32_t)(millis() - gResumeAt) >= 0) resumeFlush();
   // Audio modes run uncapped (frame == flush) EXCEPT a toy audio mode drawn down after 3s of
   // silence, which caps so the frame-gap light sleep can engage. Debug screens (isAudioMode but
   // not audioId) always stay uncapped.
@@ -4894,7 +5057,9 @@ void loop() {
   drawn = audioIdNow && audioStale(gAudioRxMillis, now, DRAWDOWN_SILENCE_MS);
 #endif
   bool uncapped = isAudioMode(currentAnimId) && !drawn;
-  uint32_t frameDelay = uncapped ? 0 : 1000UL / (gConfig.maxFps ? gConfig.maxFps : 1);
+  uint32_t cappedFps = gConfig.maxFps ? gConfig.maxFps : 1;
+  if (currentAnimId == GREETZ_ID && gNfoMode && cappedFps > NFO_MAX_FPS) cappedFps = NFO_MAX_FPS;
+  uint32_t frameDelay = uncapped ? 0 : 1000UL / cappedFps;
   if (now < nextFrameTime) {
     // Actually SLEEP the gap instead of spinning it. The CPU burns ~40mA doing nothing at any clock
     // (measured: 80MHz pinned flat-out drew the same 50mA as 240MHz idle-spinning 42% of the frame),

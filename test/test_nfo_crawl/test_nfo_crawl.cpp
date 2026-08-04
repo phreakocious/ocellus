@@ -59,6 +59,37 @@ void test_non_box_code_never_gets_a_ninth_column() {
   TEST_ASSERT_FALSE(vgaCellBit(0x2A, 8, 7));
 }
 
+// The far-end fade must actually REACH zero at the horizon. Normalised over [0, threshold] instead
+// of [scale(0), threshold] it bottoms out at scale(0)/threshold -- the original 0.55 threshold left
+// the horizon row at 0.669 brightness, which is not a fade, and it displayed the projection's worst
+// temporal aliasing (2.2 source rows per screen row) at two-thirds brightness. Even rows only: the
+// odd-row scanline dim is a separate, deliberate multiplier.
+void test_horizon_fades_to_black_and_recovers_by_the_threshold() {
+  NfoRow t[NFO_SCREEN]; nfoBuildTable(t);
+  TEST_ASSERT_EQUAL_UINT8(0, t[0].bright);              // horizon is black, not "dimmed a bit"
+  int fadeEnd = (int)((NFO_FADE_Q8 / 256.0f) * NFO_D) - NFO_H_HORIZON;
+  TEST_ASSERT_GREATER_THAN_INT(NFO_SCREEN / 8, fadeEnd);   // the band is wide enough to be a ramp
+  TEST_ASSERT_LESS_THAN_INT(NFO_SCREEN / 2, fadeEnd);      // ...and does not swallow half the glass
+  for (int y = 2; y <= fadeEnd; y += 2)                    // monotonic ramp up, no bright horizon
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT8(t[y - 2].bright, t[y].bright);
+  TEST_ASSERT_EQUAL_UINT8(255, t[fadeEnd + 2].bright);     // full brightness past the threshold
+}
+
+// The baked coverage mip owns exactly the minified region. It starts enabled at the horizon,
+// switches off once as scale rises, and never reappears in the near field. A second transition
+// would make glyph weight visibly pulse as a line travels down the crawl.
+void test_coverage_mip_has_one_far_to_near_transition() {
+  NfoRow t[NFO_SCREEN]; nfoBuildTable(t);
+  TEST_ASSERT_TRUE(t[0].mip);
+  TEST_ASSERT_FALSE(t[NFO_SCREEN - 1].mip);
+  int transitions = 0;
+  for (int y = 1; y < NFO_SCREEN; y++) {
+    if (t[y].mip != t[y - 1].mip) transitions++;
+    TEST_ASSERT_FALSE_MESSAGE(t[y].mip && !t[y - 1].mip, "mip re-enabled in near field");
+  }
+  TEST_ASSERT_EQUAL_INT(1, transitions);
+}
+
 void setUp() {} void tearDown() {}
 int main() {
   UNITY_BEGIN();
@@ -68,5 +99,7 @@ int main() {
   RUN_TEST(test_inv_col_is_reciprocal_of_cell_width);
   RUN_TEST(test_box_code_replicates_column_seven_into_column_eight);
   RUN_TEST(test_non_box_code_never_gets_a_ninth_column);
+  RUN_TEST(test_horizon_fades_to_black_and_recovers_by_the_threshold);
+  RUN_TEST(test_coverage_mip_has_one_far_to_near_transition);
   return UNITY_END();
 }

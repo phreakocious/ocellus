@@ -90,6 +90,14 @@ KEEP = {
     # RIFF/WebP wearing a .gif extension. 374x360 / 78 frames underneath, so it crops fine once the
     # container is dealt with (see webp_to_frames).
     "raccoon": {},
+
+    # Flat cartoon on a dark ground, 640x556 / 30 frames. Near-square and cheap.
+    "sassy-peach-scream": {},
+
+    # 500x500 abstract cross pattern -- square, flat graphics, so it lands at the cheap end despite
+    # 180 frames. Renamed off its download hash: the player lists clips by name and sorts them, so
+    # "gvh8cy36e7jy" would be both unreadable on the device and an arbitrary position in the order.
+    "crosses": {"src": "gvh8cy36e7jy"},
 }
 
 # --- sets: which clips go on a given unit ---------------------------------------------------------
@@ -113,6 +121,11 @@ CUT = {
     "win95":            "text-heavy and wide; unreadable at 240 px behind a round bezel",
     "flyingmanta":      "the wide horizon IS the joke; square crop leaves one manta and empty water",
     "perfecthandloop":  "250x188 source, so 240x240 is an upscale, and the fingers clip the rim",
+    "cage":             "480x284 photographic over 117 frames -- the most expensive clip in the "
+                        "batch by a wide margin, and the 1.7:1 frame loses a third of itself square",
+    "ie":               "two side-by-side panels that reveal progressively downward (the IE-is-slow "
+                        "gag); at frame 20 of 24 only the top fifth has painted, and a square crop "
+                        "splits the panels, so neither the joke nor the layout survives",
 }
 
 

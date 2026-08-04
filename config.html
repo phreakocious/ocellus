@@ -5846,7 +5846,7 @@ function buildCustomSlots() {
 function fillForm(c) {
   $("name").value = c.name || "";
   $("bootSplash").checked = !!(c.nameStyle && c.nameStyle.bootSplash);
-  $("splashStyle").value = (c.nameStyle && c.nameStyle.splashStyle) || "matrix";
+  $("splashStyle").value = (c.nameStyle && c.nameStyle.splashStyle) || "random";
   $("matrixRain").checked = !!(c.nameStyle && c.nameStyle.matrixRain);
   $("brightness").value = c.brightness ?? 40; $("brightnessVal").textContent = $("brightness").value;  // match config.h's default
   $("sleepMin").value = c.sleepMin ?? 15;

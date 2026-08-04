@@ -40,21 +40,23 @@ void test_every_line_is_full_width() {
   }
 }
 
-// "[ a ] [ b ]" occupies len(a) + len(b) + 9 columns against a 30-column interior,
-// so the pair fits iff len(a) + len(b) <= 21. Not 29 -- the brackets and the
-// separating space are eight characters that are easy to forget.
-void test_pair_predicate_accounts_for_brackets() {
-  TEST_ASSERT_TRUE (nfoPairFits("phreakocious", "kitsune"));   // 12 + 7  = 19
-  TEST_ASSERT_TRUE (nfoPairFits("Bitquark", "tense future"));  //  8 + 12 = 20
-  TEST_ASSERT_TRUE (nfoPairFits("doc", "buttersnatcher"));     //  3 + 14 = 17
-  TEST_ASSERT_FALSE(nfoPairFits("buttersnatcher", "flyingtoasters"));  // 14 + 14 = 28
-  TEST_ASSERT_FALSE(nfoPairFits("preterition", "phreakocious"));       // 11 + 12 = 23
+// The greets run packs names comma-separated until the row is full. If the packer ever
+// regressed to one name per row the box would still be well-formed and every other test would
+// still pass, so assert the packing actually happened.
+void test_greets_are_comma_packed() {
+  uint8_t grid[NFO_MAX_LINES][NFO_COLS];
+  GreetzState s; greetzInit(s, fakeRng);
+  int n = nfoBuild(s, grid, NFO_MAX_LINES, fakeRng);
+  TEST_ASSERT_TRUE(flattenGrid(grid, n).find(", ") != std::string::npos);
 }
 
-// The bracket block is 13-26 rows depending on how the shuffle pairs up (26 emitted names --
-// GREETZ_NAME_COUNT less the two the header credits -- so ceil(26/2)=13 if everything pairs,
-// 26 if nothing does); the grid must never exceed NFO_MAX_LINES for ANY shuffle, or nfoBuild
-// overruns the caller's buffer.
+// The greets run is 8-26 rows depending on how the shuffle packs (26 emitted names --
+// GREETZ_NAME_COUNT less the two the header credits); the grid must never exceed
+// NFO_MAX_LINES for ANY shuffle, or nfoBuild overruns the caller's buffer.
+//
+// The clamp is memory-safe but not content-safe, so also assert the LAST emitted row is the
+// closing rule: if the roster ever outgrew the bound, row() would pile the tail onto that one
+// row and the box would end mid-sentence with every width/border check still green.
 void test_line_count_within_bounds() {
   uint8_t grid[NFO_MAX_LINES][NFO_COLS];
   int minSeen = NFO_MAX_LINES, maxSeen = 0;
@@ -62,8 +64,10 @@ void test_line_count_within_bounds() {
     seq = trial * 7;
     GreetzState s; greetzInit(s, fakeRng);
     int n = nfoBuild(s, grid, NFO_MAX_LINES, fakeRng);
-    TEST_ASSERT_GREATER_OR_EQUAL_INT(30 + (GREETZ_NAME_COUNT - 2 + 1) / 2, n);   // 30 fixed + >=13 bracket
+    TEST_ASSERT_GREATER_THAN_INT(NFO_FIXED_LINES, n);          // fixed lines plus >=1 greets row
     TEST_ASSERT_LESS_OR_EQUAL_INT(NFO_MAX_LINES, n);
+    TEST_ASSERT_EQUAL_UINT8(NFO_BL, grid[n - 1][0]);
+    TEST_ASSERT_EQUAL_UINT8(NFO_BR, grid[n - 1][NFO_COLS - 1]);
     if (n < minSeen) minSeen = n;
     if (n > maxSeen) maxSeen = n;
   }
@@ -71,10 +75,18 @@ void test_line_count_within_bounds() {
          minSeen, maxSeen, NFO_MAX_LINES);
 }
 
-// Every handle must fit a solo bracket row, or a name silently vanishes.
+// Every handle must fit a greets row on its own, or a name silently vanishes when the packer
+// flushes and the next name still doesn't fit.
 void test_every_name_fits_a_solo_row() {
   for (int i = 0; i < GREETZ_NAME_COUNT; i++)
-    TEST_ASSERT_LESS_OR_EQUAL_INT(NFO_COLS - 2, (int)strlen(GREETZ_NAMES[i]) + 4);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(NFO_GREET_W, (int)strlen(GREETZ_NAMES[i]));
+}
+
+// Both credited names must fit the release block's value column, which is narrower than the
+// interior. snprintf would truncate them rather than overflow -- silently.
+void test_credits_fit_the_value_column() {
+  TEST_ASSERT_LESS_OR_EQUAL_INT(NFO_VALUE_W, (int)strlen(NFO_SUPPLY));
+  TEST_ASSERT_LESS_OR_EQUAL_INT(NFO_VALUE_W, (int)strlen(NFO_CRACKED));
 }
 
 // maxLines <= 0 must return 0 lines rather than let row()'s `grid[maxLines-1]` go negative
@@ -91,16 +103,19 @@ void test_zero_max_lines_returns_zero() {
 // (NFO_SUPPLY / NFO_CRACKED) -- listing those in the brackets too would print them twice in
 // one box.
 //
-// Scoped to start after "for their support:" (the line right before the bracket block) so the
-// header's own "Supply :" / "Cracked :" credits are outside the search.
+// Scoped to the greets run alone -- from the "G R E E T S" heading to the GREETZ_BEER line
+// that closes the roster. Both ends matter: the release block above credits SUPPLY/CRACKED,
+// and the sign-off below names the cracker again on purpose, so neither may be in the search.
 void test_every_name_appears_exactly_once() {
   uint8_t grid[NFO_MAX_LINES][NFO_COLS];
   GreetzState s; greetzInit(s, fakeRng);
   int n = nfoBuild(s, grid, NFO_MAX_LINES, fakeRng);
   std::string full = flattenGrid(grid, n);
-  size_t scopeStart = full.find("for their support");
+  size_t scopeStart = full.find("G R E E T S");
+  size_t scopeEnd   = full.find(GREETZ_BEER);
   TEST_ASSERT_TRUE(scopeStart != std::string::npos);
-  std::string out = full.substr(scopeStart);
+  TEST_ASSERT_TRUE(scopeEnd   != std::string::npos && scopeEnd > scopeStart);
+  std::string out = full.substr(scopeStart, scopeEnd - scopeStart);
   for (int i = 0; i < GREETZ_NAME_COUNT; i++) {
     const char* name = GREETZ_NAMES[i];
     bool credited = (strcmp(name, NFO_SUPPLY) == 0) || (strcmp(name, NFO_CRACKED) == 0);
@@ -157,9 +172,10 @@ void setUp() {} void tearDown() {}
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_every_line_is_full_width);
-  RUN_TEST(test_pair_predicate_accounts_for_brackets);
+  RUN_TEST(test_greets_are_comma_packed);
   RUN_TEST(test_line_count_within_bounds);
   RUN_TEST(test_every_name_fits_a_solo_row);
+  RUN_TEST(test_credits_fit_the_value_column);
   RUN_TEST(test_zero_max_lines_returns_zero);
   RUN_TEST(test_every_name_appears_exactly_once);
   RUN_TEST(test_bag_advances_by_the_full_name_count);

@@ -26,10 +26,13 @@ struct Config {
                                         // tuned against different content.
   uint8_t  catVariant = 0;              // treatcat cat sprite (id 46), 0..5; per-unit
   std::string startupMode = "resume";  // resume | fixed | random
-  uint8_t  startupId = 0;
+  // Used by "fixed", AND as the fallback when "resume" has nothing to resume (a unit whose NVS has
+  // no stored pick yet). 47 is Greetz -- a literal because ids never move, and pulling animations.h
+  // into config.h would widen the include graph of every config consumer for one number.
+  uint8_t  startupId = 47;
   bool     nameMatrixRain = true;
   bool     nameBootSplash = true;
-  std::string bootSplashStyle = "bounce";  // matrix | slide | bounce (only when nameBootSplash)
+  std::string bootSplashStyle = "random";  // matrix | slide | bounce | random (only when nameBootSplash)
   uint64_t favoritesMask = 0;          // bit i => animation id i (0 = all play); 64-bit for up to 64 animations
   uint16_t cycleSec = 0;               // auto-cycle favorites every N s; 0 = off
   uint64_t cycleMask = 0;              // bit i => anim id i auto-cycles; 0 = cycle the favorites

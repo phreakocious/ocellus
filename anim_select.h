@@ -53,11 +53,18 @@ inline int carouselList(uint64_t mask, uint8_t* out, int cap) {
 }
 
 // Power-on animation id. mode "fixed" -> fixedId, "random" -> randomPick, anything else -> resumeId.
-// Non-playable (debug, reserved holes, garbage) -> 0 (carried Phase-1 review item: startupId bound).
+// Every branch is clamped: debug ids, the id space's holes and outright garbage fall through rather
+// than being landed on (carried Phase-1 review item: startupId bound).
+//
+// `resume` with NOTHING TO RESUME falls back to fixedId, not to 0. A fresh unit has no stored pick
+// (blank NVS, and .rtc.data was reloaded on the cold boot), and coming up on eye 0 made every new
+// board look identical out of the box -- the configured startup animation, Greetz by default, is a
+// better introduction. The caller signals "nothing stored" by passing a non-playable resumeId,
+// which is what resumeIdLoad() returns (0xFF) on blank NVS.
 inline uint8_t resolveStartupId(const std::string& mode, uint8_t fixedId,
                                 uint8_t resumeId, uint8_t randomPick) {
-  uint8_t id = (mode == "fixed") ? fixedId
-             : (mode == "random") ? randomPick
-             : resumeId;
-  return isPlayableId(id) ? id : 0;
+  if (mode == "fixed")  return isPlayableId(fixedId)    ? fixedId    : 0;
+  if (mode == "random") return isPlayableId(randomPick) ? randomPick : 0;
+  if (isPlayableId(resumeId)) return resumeId;
+  return isPlayableId(fixedId) ? fixedId : 0;
 }

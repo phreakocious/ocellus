@@ -22,10 +22,14 @@ inline const char* const GREETZ_NAMES[GREETZ_NAME_COUNT] = {
 
 inline const char* const GREETZ_HEADER =
   "GREETZ TO MEMBERS AND FRIENDS OF NEKORAMENGANG (NRG) IN NO PARTICULAR ORDER";
-inline const char* const GREETZ_SHOUT_PRE  = "SPECIAL SHOUT OUT TO ";
+// "SHOUT OUT" and "BLAME THE BEER" are later retro-pastiche, not period scene text -- neither
+// appears in ~110 archived nfos. "Special greets to" and a trailing "and anyone we forgot!"
+// are what the corpus actually says. Shared with the .nfo crawl, which derives its wording
+// from these so the two renderings of id 47 cannot drift apart.
+inline const char* const GREETZ_SHOUT_PRE  = "SPECIAL GREETS TO ";
 inline const char* const GREETZ_SHOUT_POST = " & THE WALL OF SHEEP";
 inline const char* const GREETZ_MEMORY = "IN LOVING MEMORY OF BIND";
-inline const char* const GREETZ_BEER   = "IF WE FORGOT YOU, BLAME THE BEER!";
+inline const char* const GREETZ_BEER   = "AND ANYONE WE FORGOT!";
 inline const char* const GREETZ_CLOSER = "OVER AND OUT ------>";
 inline const char* const GREETZ_SEP_SEG  = "   :::   ";
 inline const char* const GREETZ_SEP_NAME = " :: ";

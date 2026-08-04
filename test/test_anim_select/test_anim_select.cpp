@@ -129,6 +129,19 @@ void test_resolve_startup_modes_and_clamp() {
     TEST_ASSERT_EQUAL_UINT8(0,  resolveStartupId("fixed", 99, 3, 15));  // out-of-range -> 0
 }
 
+// `resume` with nothing to resume falls back to the fixed startup id, not to 0. A fresh unit has a
+// blank NVS, so resumeIdLoad() hands back 0xFF and the board would otherwise come up on eye 0 --
+// which is what made every new unit look identical out of the box.
+void test_resume_with_nothing_stored_falls_back_to_fixed() {
+    TEST_ASSERT_EQUAL_UINT8(47, resolveStartupId("resume", 47, 0xFF, 15));  // blank NVS -> startupId
+    TEST_ASSERT_EQUAL_UINT8(47, resolveStartupId("resume", 47, DEBUG_ID, 15));  // debug id stored -> startupId
+    TEST_ASSERT_EQUAL_UINT8(47, resolveStartupId("resume", 47, 56, 15));    // past the atlas block -> startupId
+    TEST_ASSERT_EQUAL_UINT8(3,  resolveStartupId("resume", 47, 3, 15));     // a real stored pick still wins
+    TEST_ASSERT_EQUAL_UINT8(0,  resolveStartupId("resume", 47, 0, 15));     // eye 0 is a legitimate resume
+    // Both unusable -> 0. Nothing else is safe to land on.
+    TEST_ASSERT_EQUAL_UINT8(0,  resolveStartupId("resume", DEBUG_ID, 0xFF, 15));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_next_of_all_when_mask_empty);
@@ -145,5 +158,6 @@ int main(int, char**) {
     RUN_TEST(test_carousel_list_matches_next_favorite_walk);
     RUN_TEST(test_carousel_list_ignores_non_playable_mask_bits);
     RUN_TEST(test_resolve_startup_modes_and_clamp);
+    RUN_TEST(test_resume_with_nothing_stored_falls_back_to_fixed);
     return UNITY_END();
 }

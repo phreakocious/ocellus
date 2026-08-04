@@ -20,7 +20,24 @@ constexpr int NFO_SCREEN    = 240;
 constexpr int NFO_H_HORIZON = 141;
 constexpr int NFO_D         = 313;
 // Rows below this scale fade out rather than dissolving into sampling noise.
-constexpr int NFO_FADE_Q8   = 141;   // 0.55 in Q8
+//
+// The fade is normalised over [scale(0), threshold], NOT [0, threshold]. Over [0, threshold] the
+// ratio bottoms out at scale(0)/threshold, so the old 0.55 threshold left the horizon row sitting
+// at 0.669 brightness -- it never faded at all, it just dimmed slightly. That is precisely where
+// the projection is worst: at scale 0.45 one screen row spans 1/0.45 = 2.2 source rows, so a
+// 1px glyph stroke pops in and out as the text scrolls (point-sampling a minified image), and at
+// two-thirds brightness the shimmer was the most visible thing on screen.
+//
+// 0.586 puts the ramp at rows 0..42. It was briefly 0.656 (rows 0..64) when the fade was the only
+// defence against the far-end flicker, and that read as too dark -- the vertical coverage taps and
+// the faded scanlines below now handle the flicker, so the fade only has to cover the last few
+// rows where the glyph really is mush. Raise to push the horizon further down the glass.
+constexpr int NFO_FADE_Q8   = 150;   // 0.586 in Q8
+
+// Switch to the baked 2x2 coverage mip wherever a screen pixel spans roughly 1.5 or more source
+// dots. 0.668 is the same boundary at which the old round(1/scale) coverage sampler went from one
+// tap to two, but the mip pays one filtered lookup instead of OR-ing multiple full-resolution rows.
+constexpr int NFO_MIP_Q8 = 171;   // 0.668 in Q8; top ~69 screen rows
 
 struct NfoRow {
   int32_t srcYQ8;      // source Y offset for this screen row, Q8, before the scroll is added
@@ -28,6 +45,7 @@ struct NfoRow {
                        // per-pixel loop steps instead of dividing
   int32_t halfWidth;   // half the projected row width in screen px
   uint8_t bright;      // 0..255, folds the far-end fade and the scanline dim together
+  uint8_t mip;         // use VGA_FONT_MIP's 2x2 coverage texels on this minified row
 };
 
 inline void nfoBuildTable(NfoRow out[NFO_SCREEN]) {
@@ -38,10 +56,21 @@ inline void nfoBuildTable(NfoRow out[NFO_SCREEN]) {
     out[y].srcYQ8    = (int32_t)((y / s) * 256.0f);
     out[y].invColQ16 = (int32_t)((1.0f / (s * VGA_CELL_W)) * 65536.0f);
     out[y].halfWidth = (int32_t)(rowPx * s * 0.5f);
-    float b = s >= (NFO_FADE_Q8 / 256.0f) ? 1.0f
-                                          : (s / (NFO_FADE_Q8 / 256.0f)) * (s / (NFO_FADE_Q8 / 256.0f));
-    if (y & 1) b *= 0.55f;                          // scanlines
+    const float thresh = NFO_FADE_Q8 / 256.0f;
+    const float far    = (float)NFO_H_HORIZON / (float)NFO_D;   // scale(0), the smallest scale drawn
+    float b = 1.0f;
+    if (s < thresh) { b = (s - far) / (thresh - far); if (b < 0.0f) b = 0.0f; b *= b; }
+    // Scanlines are a NEAR-field effect. At the far end a screen row already spans 2+ source rows,
+    // so dimming every other one throws away half of the little vertical resolution left, and it
+    // costs brightness exactly where the fade band can least afford it. Scale the scanline depth
+    // by the fade itself: full 0.55 dim at full brightness, none at the horizon.
+    if (y & 1) b *= 1.0f - 0.45f * b;
     out[y].bright = (uint8_t)(b * 255.0f);
+
+    // The far field consumes a build-time-filtered font mip. It preserves partial strokes as
+    // coverage instead of OR-ing them into thicker glyphs, and trades the old 2-3 hot-loop font
+    // probes for one packed-table lookup (two only while interpolating between mip rows).
+    out[y].mip = (uint8_t)(s <= (NFO_MIP_Q8 / 256.0f));
   }
 }
 

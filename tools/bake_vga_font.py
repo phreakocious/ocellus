@@ -11,8 +11,15 @@ venv does not have (it has pyserial, which is why tools/flash.py uses it instead
     python3 tools/bake_vga_font.py
 
 Emits vga_font.h. Glyphs are baked 8 wide, not 9: the VGA 9th column carries only the
-box-drawing column-duplication rule (CP437 0xC0..0xDF), which vga_draw.h's vgaCellBit()
-synthesizes at draw time rather than storing as a 9th bit per row.
+box-drawing column-duplication rule (CP437 0xC0..0xDF), which vgaCellBit() synthesizes at
+draw time rather than storing as a 9th bit per row.
+
+The header also carries a 5x8 coverage mip for the perspective crawl. Each mip texel counts
+the lit dots in one 2x2 source block (0..4) and five 3-bit counts fit in one uint16_t. The
+9th-dot bucket duplicates its lone horizontal sample so it stays normalized to four samples like
+every other bucket.
+This is old-school flash-for-cycles: 3.5 KB buys stable far-field minification without doing the
+2x2 filter in the render loop.
 
 Codes 32..255 are decoded through the CP437 codepage, not raw Unicode code points: chr(0xC9)
 is 'E' with an acute accent, but CP437 0xC9 is the box-drawing double corner glyph at U+2554.
@@ -87,6 +94,29 @@ def bake(ttf: Path):
     return rows_per_glyph
 
 
+def mip_rows(code: int, rows):
+    """Pack the glyph's 5x8 2x2 coverage mip as eight uint16_t rows."""
+    def source_bit(x: int, y: int) -> int:
+        if x == CELL_W:
+            return int(0xC0 <= code <= 0xDF and (rows[y] & 0x01) != 0)
+        return int((rows[y] & (0x80 >> x)) != 0)
+
+    packed_rows = []
+    for my in range(CELL_H // 2):
+        packed = 0
+        for mx in range((CELL_W + 2) // 2):
+            x0 = mx * 2
+            # The synthesized ninth dot has no tenth neighbour. Duplicate it so its bucket still
+            # represents four samples and a solid CP437 join keeps coverage 4, not 2.
+            x1 = x0 + 1 if x0 + 1 <= CELL_W else x0
+            coverage = sum(source_bit(x, y)
+                           for y in (my * 2, my * 2 + 1)
+                           for x in (x0, x1))
+            packed |= coverage << (mx * 3)
+        packed_rows.append(packed)
+    return packed_rows
+
+
 def emit(glyphs):
     n = len(glyphs)
     out = [
@@ -106,6 +136,8 @@ def emit(glyphs):
         f"constexpr uint8_t VGA_FONT_LAST  = {LAST};",
         f"constexpr int     VGA_FONT_W     = {CELL_W};",
         f"constexpr int     VGA_FONT_H     = {CELL_H};",
+        f"constexpr int     VGA_MIP_W      = {(CELL_W + 2) // 2};",
+        f"constexpr int     VGA_MIP_H      = {CELL_H // 2};",
         "",
         "// The VGA 9-dot text cell. VGA_FONT_W above is the BITMAP width (8) and must stay 8 --",
         "// bounce_splash.h derives its glyph radius and arc spacing from it. VGA_CELL_W is the",
@@ -118,6 +150,18 @@ def emit(glyphs):
     ]
     for code, rows in glyphs:
         body = ",".join(f"0x{b:02X}" for b in rows)
+        label = "space" if code == 32 else repr(bytes([code]).decode("cp437"))
+        out.append(f"  {{{body}}},  // {code} {label}")
+    out += [
+        "};",
+        "",
+        "// Half-resolution 2x2 coverage mip for the perspective crawl. Each uint16_t packs five",
+        "// 3-bit counts (0..4), left to right. It is generated from the exact full-resolution",
+        "// rows above, including the CP437 ninth-dot join rule; never edit this table by hand.",
+        f"inline const uint16_t VGA_FONT_MIP[{n}][{CELL_H // 2}] = {{",
+    ]
+    for code, rows in glyphs:
+        body = ",".join(f"0x{p:04X}" for p in mip_rows(code, rows))
         label = "space" if code == 32 else repr(bytes([code]).decode("cp437"))
         out.append(f"  {{{body}}},  // {code} {label}")
     out += [
@@ -139,9 +183,31 @@ def emit(glyphs):
         "  return (bits & (0x80 >> col)) != 0;",
         "}",
         "",
+        "// All nine dots of one source row, bit 8 = leftmost and bit 0 = synthesized ninth dot.",
+        "// The crawl expands one of these per character before scanning a projected output row,",
+        "// so its pixel loop is a mask test rather than another font-table lookup.",
+        "inline uint16_t vgaCellRowBits(uint8_t code, int row) {",
+        "  if (code < VGA_FONT_FIRST || row < 0 || row >= VGA_FONT_H) return 0;",
+        "  uint8_t bits = VGA_FONT[code - VGA_FONT_FIRST][row];",
+        "  uint16_t out = (uint16_t)bits << 1;",
+        "  if (code >= 0xC0 && code <= 0xDF && (bits & 0x01)) out |= 1;",
+        "  return out;",
+        "}",
+        "",
+        "// Coverage of the 2x2 source block containing full-resolution dot (col,row), 0..4.",
+        "// Callers keep their original 9x16 coordinates, so switching to the mip never changes",
+        "// cell geometry. The generated data already includes the ninth-dot CP437 join rule.",
+        "inline uint8_t vgaMipCoverage(uint8_t code, int col, int row) {",
+        "  if (code < VGA_FONT_FIRST || col < 0 || col >= VGA_CELL_W || row < 0 || row >= VGA_FONT_H) return 0;",
+        "  uint16_t packed = VGA_FONT_MIP[code - VGA_FONT_FIRST][row >> 1];",
+        "  return (uint8_t)((packed >> ((col >> 1) * 3)) & 0x07);",
+        "}",
+        "",
     ]
     OUT.write_text("\n".join(out))
-    print(f"wrote {OUT} -- {n} glyphs, {n * CELL_H} bytes")
+    full_bytes = n * CELL_H
+    mip_bytes = n * (CELL_H // 2) * 2
+    print(f"wrote {OUT} -- {n} glyphs, {full_bytes} font bytes + {mip_bytes} mip bytes")
 
 
 if __name__ == "__main__":
