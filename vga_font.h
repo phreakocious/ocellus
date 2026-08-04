@@ -15,6 +15,13 @@ constexpr uint8_t VGA_FONT_LAST  = 255;
 constexpr int     VGA_FONT_W     = 8;
 constexpr int     VGA_FONT_H     = 16;
 
+// The VGA 9-dot text cell. VGA_FONT_W above is the BITMAP width (8) and must stay 8 --
+// bounce_splash.h derives its glyph radius and arc spacing from it. VGA_CELL_W is the
+// ADVANCE width, used by callers that want authentic CP437 line-drawing. Kept here rather
+// than in vga_draw.h (which pulls in Arduino_GFX_Library.h) so pure/host-side consumers
+// like nfo_crawl.h can get it without an Arduino dependency.
+constexpr int     VGA_CELL_W     = 9;
+
 inline const uint8_t VGA_FONT[224][16] = {
   {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},  // 32 space
   {0x00,0x00,0x18,0x3C,0x3C,0x3C,0x18,0x18,0x18,0x00,0x18,0x18,0x00,0x00,0x00,0x00},  // 33 '!'
