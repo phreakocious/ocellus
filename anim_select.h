@@ -18,7 +18,7 @@ inline uint8_t nextFavorite(uint64_t mask, uint8_t cur) {
 }
 
 // Previous playable animation id, searching backward from `cur` (exclusive) and wrapping,
-// whose favorites bit is set. Mirror of nextFavorite for swipe-left paging.
+// whose favorites bit is set. Mirror of nextFavorite for swipe-right paging.
 inline uint8_t prevFavorite(uint64_t mask, uint8_t cur) {
   mask &= PLAYABLE_MASK;
   if (mask == 0) mask = PLAYABLE_MASK;
