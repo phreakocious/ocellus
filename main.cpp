@@ -5203,7 +5203,12 @@ void loop() {
   static bool gPanelOverlay = false;
   bool overlay = pipDrawn || gCarouselOpen;
   uint32_t tFlush = micros();
-  if (!gFbUnchanged || overlay || gPanelOverlay) canvas->flush();
+  // USB-gated: the nap the skip buys makes the loop ~97% deaf to serial RX (bytes landing mid-
+  // light-sleep are lost at the UART, retries included -- measured: 12 sends, 0 replies), which
+  // would break config.html in exactly the static modes. A host can only exist over the USB cable,
+  // so skip only on battery. usbPowered()'s voltage latch errs toward "usb", i.e. toward flushing.
+  // Bench-verify the battery path with {"cmd":"batsim","mv":3600} -- and expect the deafness.
+  if (!gFbUnchanged || overlay || gPanelOverlay || gBatt.usbPowered()) canvas->flush();
   gPanelOverlay = overlay;
   if (pipDrawn) clipPipRestore();         // canvas back to clean before the next render
   profTick(id, tFlush - tRender, micros() - tFlush);   // clear+render vs push-to-panel
