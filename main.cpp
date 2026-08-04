@@ -8,6 +8,7 @@
 #include "config.h"
 #include "config_store.h"
 #include "protocol.h"
+#include "version.h"
 #include "anim_select.h"
 #include "carousel.h"
 #include "animations.h"
@@ -4150,6 +4151,7 @@ void renderSensorDebug(uint32_t now) {
   #define DBG_LINE(col, ...) do { snprintf(buf, sizeof buf, __VA_ARGS__); \
     canvas->setTextColor(col); canvas->setCursor(x, y); canvas->print(buf); y += dy; } while (0)
   DBG_LINE(hi, "SENSOR DEBUG  id%d", DEBUG_ID);
+  DBG_LINE(lo, "fw %s", OCELLUS_VERSION);   // triple-click gets here on any board -- no cable needed
   if (!imuPresent) { DBG_LINE(warn, "IMU: none"); }
   else {
     DBG_LINE(lo, "acc %6d %6d %6d", ax, ay, az);

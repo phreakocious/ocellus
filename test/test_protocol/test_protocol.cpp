@@ -1,5 +1,6 @@
 #include <unity.h>
 #include <ArduinoJson.h>
+#include <cstring>
 #include "../../protocol.h"
 #include "../../config.h"
 #include "../../animations.h"
@@ -13,6 +14,26 @@ void test_catalog_lists_all_animations() {
     TEST_ASSERT_FALSE(deserializeJson(d, r));
     TEST_ASSERT_EQUAL_STRING("catalog", d["type"]);
     TEST_ASSERT_EQUAL_UINT32(REGISTRY_COUNT, (uint32_t)d["animations"].as<JsonArray>().size());  // playable + dev sensor-debug
+}
+
+// Firmware identity rides on `catalog`, never on `get`. A Config field would round-trip through
+// `set` into NVS and then report whichever build was running when the config was last saved --
+// stale in exactly the situation you'd be asking the question.
+//
+// Asserts non-empty rather than an exact value: the global [env] section in platformio.ini stamps
+// the host build too, so this reads a real `git describe` here, not version.h's "dev" fallback.
+// Pinning "dev" would pass only by accident of how the hook happens to be wired.
+void test_catalog_carries_firmware_version() {
+    Config c;
+    bool changed = true;
+    JsonDocument d;
+    TEST_ASSERT_FALSE(deserializeJson(d, handleLine("{\"cmd\":\"catalog\"}", c, changed)));
+    TEST_ASSERT_TRUE(d["fw"].is<const char*>());
+    TEST_ASSERT_TRUE(strlen(d["fw"].as<const char*>()) > 0);
+
+    // ...and must NOT be in `get`, which is the config surface.
+    TEST_ASSERT_FALSE(deserializeJson(d, handleLine("{\"cmd\":\"get\"}", c, changed)));
+    TEST_ASSERT_FALSE(d["fw"].is<const char*>());
 }
 
 void test_get_returns_config() {
@@ -82,6 +103,7 @@ void test_anim_selects_live_animation() {
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_catalog_lists_all_animations);
+    RUN_TEST(test_catalog_carries_firmware_version);
     RUN_TEST(test_anim_selects_live_animation);
     RUN_TEST(test_get_returns_config);
     RUN_TEST(test_set_applies_and_flags_changed);

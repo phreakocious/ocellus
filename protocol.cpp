@@ -1,6 +1,7 @@
 #include "protocol.h"
 #include "animations.h"
 #include "palette.h"
+#include "version.h"
 #include <ArduinoJson.h>
 
 static_assert(PRESET_COUNT == PALETTE_PRESET_COUNT,
@@ -9,6 +10,10 @@ static_assert(PRESET_COUNT == PALETTE_PRESET_COUNT,
 std::string catalogJson() {
   JsonDocument d;
   d["type"] = "catalog";
+  // Firmware identity belongs here, not in `get`: catalog is static device info, while a Config
+  // field would round-trip through `set` into NVS and then report the build that was running when
+  // the config was last saved.
+  d["fw"] = OCELLUS_VERSION;
   JsonArray a = d["animations"].to<JsonArray>();
   for (const AnimInfo& info : ANIMS) {
     JsonObject o = a.add<JsonObject>();
