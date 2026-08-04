@@ -211,6 +211,13 @@ void pollConfigSerial() {
         Serial.printf("{\"type\":\"batsim\",\"mv\":%d}\n", gBatSimMv);
         g_rxbuf.clear(); continue;
       }
+      if (g_rxbuf.find("\"cpumhz\"") != std::string::npos) {   // {"cmd":"cpumhz","mhz":160} -> live clock A/B against the current meter; not persisted, boots at 240
+        size_t p = g_rxbuf.find("\"mhz\"");
+        int mhz = (p != std::string::npos) ? atoi(g_rxbuf.c_str() + g_rxbuf.find(':', p) + 1) : 0;
+        if (mhz == 80 || mhz == 160 || mhz == 240) setCpuFrequencyMhz(mhz);   // >=80 keeps APB at 80MHz, so UART baud / SPI / LEDC timing are untouched
+        Serial.printf("{\"type\":\"cpumhz\",\"mhz\":%d}\n", (int)getCpuFrequencyMhz());
+        g_rxbuf.clear(); continue;
+      }
 #if OCELLUS_AUDIO
       if (handleTapCmd(g_rxbuf)) { g_rxbuf.clear(); continue; }   // {"cmd":"tap",...} -- device state, lives beside "bat", not in protocol.cpp
 #endif
