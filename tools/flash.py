@@ -113,9 +113,9 @@ def get_config(port, wait=3.0):
         s.close()
 
 
-def probe(port):
+def probe(port, wait=3.0):
     """True if the port answers the ocellus config protocol with a config object."""
-    return isinstance(get_config(port), dict)
+    return isinstance(get_config(port, wait=wait), dict)
 
 
 def list_boards(do_probe):
@@ -153,7 +153,7 @@ def ch343_ports():
     return sorted(p.device for p in list_ports.comports() if (p.vid, p.pid) == CH343_ID)
 
 
-def find_port(want_ch343):
+def find_port(want_ch343, wait=3.0):
     # The probe can't tell WHICH ocellus answered (console and bench S3 both answer), so the
     # target decides the search: s3-touch is the only CH343 board -> descriptor match ONLY,
     # never a probe-answering native-USB ocellus (that exact fallthrough once put s3-touch
@@ -179,7 +179,7 @@ def find_port(want_ch343):
     for p in ports():
         if p in ch343:
             continue          # opening a CH343 auto-resets it mid-handshake -> can't probe anyway
-        if probe(p):
+        if probe(p, wait=wait):
             return p
     return None
 
@@ -262,7 +262,10 @@ def main():
         sys.exit("upload failed (Web Serial tab holding the port? wrong chip for this env?)")
 
     time.sleep(3)   # let it reboot + re-enumerate; the /dev number can change
-    back = args.port if (args.port and args.port in ports()) else find_port(args.target == "s3-touch")
+    # wait=15.0, same as list_boards: the esptool hard reset + this settle totals ~9.3s -- exactly
+    # the deaf boot-splash length -- so get_config's default 3.0 lands on the boundary and --anim
+    # intermittently reads a healthy board as silent (see get_config's docstring).
+    back = args.port if (args.port and args.port in ports()) else find_port(args.target == "s3-touch", wait=15.0)
     if not back:
         print("Flashed OK, but the board hasn't answered yet -- give it a moment / check it.")
         return

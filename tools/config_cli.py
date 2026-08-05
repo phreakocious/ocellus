@@ -38,9 +38,11 @@ def rpc(ser, obj, attempts=3):
             if not line:
                 continue
             try:
-                return json.loads(line)
+                v = json.loads(line)
             except ValueError:
                 continue   # device log line ([prof]/[boot]/[espnow]), not a protocol reply -- keep reading
+            if isinstance(v, dict):   # every device reply is an object; a bare number/string is a
+                return v              # torn-line fragment (e.g. "812" from a sheared [prof]) -- keep waiting
     raise TimeoutError("no response")
 
 def wait_ready(ser, timeout=20.0):
