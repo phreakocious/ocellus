@@ -59,6 +59,47 @@ void test_set_applies_and_flags_changed() {
     TEST_ASSERT_EQUAL_STRING("config", d["type"]);   // echoes new config
 }
 
+// Fake store for the persist hook -- simulates NVS refusing the write (its 4000 B string cap
+// fails nvs_set_str with the old value kept). The `set` echo is serialized from the RAM struct,
+// so it cannot see that failure: without the err reply the host's echo-verify passes and the unit
+// silently reverts wholesale at reboot.
+static int  gPersistCalls = 0;
+static bool gPersistOk    = true;
+static bool fakePersist(const Config&) { gPersistCalls++; return gPersistOk; }
+
+void test_set_persist_failure_answers_err() {
+    Config c;
+    bool changed = false;
+    gPersistCalls = 0; gPersistOk = false;
+    std::string r = handleLine("{\"cmd\":\"set\",\"config\":{\"brightness\":12}}", c, changed, nullptr, fakePersist);
+    TEST_ASSERT_EQUAL_INT(1, gPersistCalls);
+    JsonDocument d;
+    TEST_ASSERT_FALSE(deserializeJson(d, r));
+    TEST_ASSERT_EQUAL_STRING("err", d["type"]);          // NOT the config echo
+    TEST_ASSERT_EQUAL_STRING("cfg too big", d["msg"]);
+    TEST_ASSERT_TRUE(changed);                           // RAM took the set (caller still applies it live)
+    TEST_ASSERT_EQUAL_UINT8(12, c.brightness);
+}
+
+void test_set_persist_success_echoes_config() {
+    Config c;
+    bool changed = false;
+    gPersistCalls = 0; gPersistOk = true;
+    std::string r = handleLine("{\"cmd\":\"set\",\"config\":{\"brightness\":34}}", c, changed, nullptr, fakePersist);
+    TEST_ASSERT_EQUAL_INT(1, gPersistCalls);
+    TEST_ASSERT_TRUE(changed);
+    JsonDocument d;
+    TEST_ASSERT_FALSE(deserializeJson(d, r));
+    TEST_ASSERT_EQUAL_STRING("config", d["type"]);       // clean echo when the write landed
+
+    // Read-only commands and a rejected set never reach the store.
+    gPersistCalls = 0;
+    handleLine("{\"cmd\":\"get\"}", c, changed, nullptr, fakePersist);
+    handleLine("{\"cmd\":\"catalog\"}", c, changed, nullptr, fakePersist);
+    handleLine("{\"cmd\":\"set\",\"config\":5}", c, changed, nullptr, fakePersist);   // "no config" err
+    TEST_ASSERT_EQUAL_INT(0, gPersistCalls);
+}
+
 void test_unknown_cmd_errors() {
     Config c;
     bool changed = true;
@@ -107,6 +148,8 @@ int main(int, char**) {
     RUN_TEST(test_anim_selects_live_animation);
     RUN_TEST(test_get_returns_config);
     RUN_TEST(test_set_applies_and_flags_changed);
+    RUN_TEST(test_set_persist_failure_answers_err);
+    RUN_TEST(test_set_persist_success_echoes_config);
     RUN_TEST(test_unknown_cmd_errors);
     return UNITY_END();
 }

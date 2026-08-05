@@ -207,9 +207,15 @@ void test_qr_fields_roundtrip_and_validate() {
     TEST_ASSERT_EQUAL_UINT8(25, b.qrSize);
     TEST_ASSERT_EQUAL_STRING("a5", b.qrBits.c_str());
     Config c;
-    TEST_ASSERT_TRUE(configFromJson("{\"qrSize\":200}", c));          // > version 40 -> unconfigured
+    TEST_ASSERT_TRUE(configFromJson("{\"qrSize\":200}", c));          // out of range -> unconfigured
     TEST_ASSERT_EQUAL_UINT8(0, c.qrSize);
     TEST_ASSERT_TRUE(configFromJson("{\"qrSize\":7}", c));            // below min QR (21) -> unconfigured
+    TEST_ASSERT_EQUAL_UINT8(0, c.qrSize);
+    // Ceiling is version 18 (89 modules), NOT version 40: past v18 the qrBits hex outgrows the
+    // 2048 B serial line cap and can physically never arrive, so accepting the size was a lie.
+    TEST_ASSERT_TRUE(configFromJson("{\"qrSize\":89}", c));
+    TEST_ASSERT_EQUAL_UINT8(89, c.qrSize);
+    TEST_ASSERT_TRUE(configFromJson("{\"qrSize\":90}", c));           // just past v18 -> unconfigured
     TEST_ASSERT_EQUAL_UINT8(0, c.qrSize);
     TEST_ASSERT_TRUE(configFromJson("{\"qrBits\":\"12zz\"}", c));     // non-hex (RX-mangled line) -> dropped
     TEST_ASSERT_EQUAL_STRING("", c.qrBits.c_str());
@@ -239,6 +245,77 @@ void test_favorites_drop_reserved_holes() {
     TEST_ASSERT_EQUAL_UINT64(1ull << 41, c.cycleMask);                      // unknown dropped
 }
 
+// Oversize policy: display copy (name, mode strings, palette labels) clamps -- truncation stays
+// usable; the QR pair rejects, keeping the previous value -- a truncated URL or bitmap is silently
+// wrong. Either way the rest of the same line must decode untouched.
+void test_string_caps_clamp_or_reject() {
+    Config c;
+    std::string longName(CFG_NAME_MAX + 20, 'n');
+    TEST_ASSERT_TRUE(configFromJson("{\"name\":\"" + longName + "\",\"brightness\":77}", c));
+    TEST_ASSERT_EQUAL_UINT(CFG_NAME_MAX, (unsigned)c.name.size());   // clamped, not dropped
+    TEST_ASSERT_EQUAL_UINT8(77, c.brightness);                       // same line still decoded
+
+    std::string prevText = c.qrText;                                 // the default URL
+    std::string bigText(CFG_QR_TEXT_MAX + 1, 'q');
+    TEST_ASSERT_TRUE(configFromJson("{\"qrText\":\"" + bigText + "\",\"sleepMin\":9}", c));
+    TEST_ASSERT_EQUAL_STRING(prevText.c_str(), c.qrText.c_str());    // rejected -> previous kept
+    TEST_ASSERT_EQUAL_UINT8(9, c.sleepMin);
+    std::string okText(CFG_QR_TEXT_MAX, 'q');                        // at cap -> accepted
+    TEST_ASSERT_TRUE(configFromJson("{\"qrText\":\"" + okText + "\"}", c));
+    TEST_ASSERT_EQUAL_UINT(CFG_QR_TEXT_MAX, (unsigned)c.qrText.size());
+
+    std::string okBits(CFG_QR_BITS_MAX, 'a');                        // at cap -> accepted
+    TEST_ASSERT_TRUE(configFromJson("{\"qrBits\":\"" + okBits + "\"}", c));
+    TEST_ASSERT_EQUAL_UINT(CFG_QR_BITS_MAX, (unsigned)c.qrBits.size());
+    std::string bigBits(CFG_QR_BITS_MAX + 2, 'b');
+    TEST_ASSERT_TRUE(configFromJson("{\"qrBits\":\"" + bigBits + "\"}", c));
+    TEST_ASSERT_EQUAL_UINT(CFG_QR_BITS_MAX, (unsigned)c.qrBits.size());   // rejected -> previous kept
+    TEST_ASSERT_EQUAL('a', c.qrBits[0]);
+
+    std::string bigMode(CFG_MODE_STR_MAX + 30, 'm');
+    TEST_ASSERT_TRUE(configFromJson("{\"startup\":{\"mode\":\"" + bigMode + "\"},"
+                                    "\"nameStyle\":{\"splashStyle\":\"" + bigMode + "\"}}", c));
+    TEST_ASSERT_EQUAL_UINT(CFG_MODE_STR_MAX, (unsigned)c.startupMode.size());
+    TEST_ASSERT_EQUAL_UINT(CFG_MODE_STR_MAX, (unsigned)c.bootSplashStyle.size());
+
+    std::string palName(CFG_PAL_NAME_MAX + 10, 'p');
+    TEST_ASSERT_TRUE(configFromJson("{\"palettes\":{\"custom\":[{\"name\":\"" + palName + "\","
+        "\"colors\":[\"#ffffff\",\"#ffffff\",\"#ffffff\",\"#ffffff\",\"#ffffff\",\"#ffffff\",\"#ffffff\"]}]}}", c));
+    TEST_ASSERT_EQUAL_UINT(CFG_PAL_NAME_MAX, (unsigned)c.customPalettes[0].name.size());
+    TEST_ASSERT_EQUAL_UINT(CFG_PAL_COLORS_MAX, (unsigned)c.customPalettes[0].colors.size());  // 7 stops -> 5
+}
+
+// The guard that makes NVS's 4000 B nvs_set_str cap unreachable: every string field at its decode
+// cap, every mask full, all 4 custom palettes maxed -- and the serialized blob must still clear
+// 3900 B. If adding a field or raising a cap trips this, trim a cap; do not raise 3900 (the last
+// 100 B is margin for JSON escaping and the null terminator NVS counts).
+void test_maximal_config_stays_under_nvs_cap() {
+    Config c;
+    c.name = std::string(CFG_NAME_MAX, 'W');
+    c.brightness = 255; c.sleepMin = 255; c.maxFps = 120;
+    c.slideshowSec = 60; c.gifSec = 60; c.catVariant = 5;
+    c.startupMode = std::string(CFG_MODE_STR_MAX, 'm');
+    c.bootSplashStyle = std::string(CFG_MODE_STR_MAX, 's');
+    c.cycleSec = 65535; c.paletteRotateSec = 65535;
+    c.palettesEnabled = 0xFFFFFFFFu;
+    for (int i = 0; i < ANIM_COUNT; i++)
+        if (isPlayableId(i)) { c.favoritesMask |= (1ull << i); c.cycleMask |= (1ull << i); }
+    c.qrText = std::string(CFG_QR_TEXT_MAX, 'q');
+    c.qrSize = CFG_QR_SIZE_MAX;
+    c.qrBits = std::string(CFG_QR_BITS_MAX, 'f');
+    for (int i = 0; i < MAX_CUSTOM; i++)
+        c.customPalettes.push_back({std::string(CFG_PAL_NAME_MAX, 'p'),
+                                    std::vector<uint16_t>(CFG_PAL_COLORS_MAX, 0xFFFF)});
+    std::string js = configToJson(c);
+    TEST_ASSERT_LESS_THAN_UINT32(3900u, (uint32_t)js.size());
+    Config b;                                    // and the decode caps accept their own maximum
+    TEST_ASSERT_TRUE(configFromJson(js, b));
+    TEST_ASSERT_EQUAL_UINT(CFG_NAME_MAX, (unsigned)b.name.size());
+    TEST_ASSERT_EQUAL_UINT(CFG_QR_TEXT_MAX, (unsigned)b.qrText.size());
+    TEST_ASSERT_EQUAL_UINT(CFG_QR_BITS_MAX, (unsigned)b.qrBits.size());
+    TEST_ASSERT_EQUAL_UINT(MAX_CUSTOM, (unsigned)b.customPalettes.size());
+}
+
 void test_catVariant_clamps_out_of_range() {
   Config c;
   TEST_ASSERT_TRUE(configFromJson("{\"catVariant\":3}", c));
@@ -265,6 +342,8 @@ int main(int, char**) {
     RUN_TEST(test_qr_fields_roundtrip_and_validate);
     RUN_TEST(test_qr_module_unpacks_msb_first_row_major);
     RUN_TEST(test_favorites_drop_reserved_holes);
+    RUN_TEST(test_string_caps_clamp_or_reject);
+    RUN_TEST(test_maximal_config_stays_under_nvs_cap);
     RUN_TEST(test_catVariant_clamps_out_of_range);
     return UNITY_END();
 }

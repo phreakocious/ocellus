@@ -33,7 +33,8 @@ std::string catalogJson() {
   return out;
 }
 
-std::string handleLine(const std::string& line, Config& cfg, bool& changed, int* animSelOut) {
+std::string handleLine(const std::string& line, Config& cfg, bool& changed, int* animSelOut,
+                       ConfigPersistFn persist) {
   changed = false;
   if (animSelOut) *animSelOut = -1;
   JsonDocument d;
@@ -55,6 +56,9 @@ std::string handleLine(const std::string& line, Config& cfg, bool& changed, int*
     serializeJson(d["config"], sub);
     if (!configFromJson(sub, cfg)) return "{\"type\":\"err\",\"msg\":\"bad config\"}";
     changed = true;
+    // A failed NVS write must NOT get the clean echo: the echo comes from the RAM struct, so
+    // echo-verify would pass while the unit silently reverts wholesale at reboot.
+    if (persist && !persist(cfg)) return "{\"type\":\"err\",\"msg\":\"cfg too big\"}";
     return configToJson(cfg);
   }
   return "{\"type\":\"err\",\"msg\":\"unknown cmd\"}";

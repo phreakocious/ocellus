@@ -79,10 +79,16 @@ std::string configToJson(const Config& c) {
   return out;
 }
 
+// Oversize policy at decode (caps: config.h CFG_*): display copy (name, mode strings, palette
+// labels) is CLAMPED -- a truncated label is still usable; the QR pair (qrText/qrBits) is
+// REJECTED, keeping the previous value -- a truncated URL or bitmap is silently wrong. Either way
+// only the offending field is touched; the rest of the line decodes normally.
+static void clampStr(std::string& s, size_t max) { if (s.size() > max) s.resize(max); }
+
 bool configFromJson(const std::string& json, Config& c) {
   JsonDocument d;
   if (deserializeJson(d, json)) return false;
-  if (d["name"].is<const char*>())      c.name = d["name"].as<std::string>();
+  if (d["name"].is<const char*>())      { c.name = d["name"].as<std::string>(); clampStr(c.name, CFG_NAME_MAX); }
   if (d["brightness"].is<int>())        { int v = d["brightness"].as<int>(); c.brightness = v < 0 ? 0 : (v > 255 ? 255 : v); }
   if (d["sleepMin"].is<int>())          { int v = d["sleepMin"].as<int>(); c.sleepMin = v < 0 ? 0 : (v > 255 ? 255 : v); }
   if (d["maxFps"].is<int>())            { int v = d["maxFps"].as<int>(); c.maxFps = v < 1 ? 1 : (v > 120 ? 120 : v); }
@@ -96,13 +102,13 @@ bool configFromJson(const std::string& json, Config& c) {
   if (d["gifSec"].is<int>()) { int v = d["gifSec"].as<int>(); c.gifSec = v < 1 ? 1 : (v > 60 ? 60 : v); }
   if (d["catVariant"].is<int>()) { int v = d["catVariant"].as<int>(); c.catVariant = (v < 0 || v > 5) ? 0 : (uint8_t)v; }
   if (d["startup"].is<JsonObject>()) {
-    if (d["startup"]["mode"].is<const char*>()) c.startupMode = d["startup"]["mode"].as<std::string>();
+    if (d["startup"]["mode"].is<const char*>()) { c.startupMode = d["startup"]["mode"].as<std::string>(); clampStr(c.startupMode, CFG_MODE_STR_MAX); }
     if (d["startup"]["id"].is<int>())           { int v = d["startup"]["id"].as<int>(); c.startupId = isPlayableId(v) ? (uint8_t)v : 0; }
   }
   if (d["nameStyle"].is<JsonObject>()) {
     if (d["nameStyle"]["matrixRain"].is<bool>()) c.nameMatrixRain = d["nameStyle"]["matrixRain"];
     if (d["nameStyle"]["bootSplash"].is<bool>()) c.nameBootSplash = d["nameStyle"]["bootSplash"];
-    if (d["nameStyle"]["splashStyle"].is<const char*>()) c.bootSplashStyle = d["nameStyle"]["splashStyle"].as<std::string>();
+    if (d["nameStyle"]["splashStyle"].is<const char*>()) { c.bootSplashStyle = d["nameStyle"]["splashStyle"].as<std::string>(); clampStr(c.bootSplashStyle, CFG_MODE_STR_MAX); }
   }
   if (d["favorites"].is<JsonArray>()) {
     c.favoritesMask = 0;
@@ -120,12 +126,21 @@ bool configFromJson(const std::string& json, Config& c) {
     }
   }
   if (d["stayAwakeUsb"].is<bool>()) c.stayAwakeUsb = d["stayAwakeUsb"];
-  if (d["qrText"].is<const char*>()) c.qrText = d["qrText"].as<std::string>();
-  if (d["qrSize"].is<int>()) { int v = d["qrSize"].as<int>(); c.qrSize = (v >= 21 && v <= 177) ? (uint8_t)v : 0; }  // real QR versions only; else unconfigured
+  if (d["qrText"].is<const char*>()) {
+    std::string t = d["qrText"].as<std::string>();
+    if (t.size() <= CFG_QR_TEXT_MAX) c.qrText = t;   // oversize rejected: can't encode at <= v18 anyway; keep the last coherent text
+  }
+  // 21..89: real QR versions the transport can carry. The old 177 (v40) ceiling was a promise the
+  // transport can't keep -- past v18 the qrBits hex exceeds the 2048 B serial line cap and can
+  // physically never arrive. config.html's encoder is capped at v18 to match. Else unconfigured.
+  if (d["qrSize"].is<int>()) { int v = d["qrSize"].as<int>(); c.qrSize = (v >= 21 && v <= CFG_QR_SIZE_MAX) ? (uint8_t)v : 0; }
   if (d["qrBits"].is<const char*>()) {
-    c.qrBits = d["qrBits"].as<std::string>();
-    for (char h : c.qrBits)
-      if (!((h >= '0' && h <= '9') || ((h | 32) >= 'a' && (h | 32) <= 'f'))) { c.qrBits.clear(); break; }  // non-hex = corrupt line, drop
+    std::string t = d["qrBits"].as<std::string>();
+    if (t.size() <= CFG_QR_BITS_MAX) {   // oversize rejected: a truncated bitmap blits as noise; keep the last good one
+      c.qrBits = t;
+      for (char h : c.qrBits)
+        if (!((h >= '0' && h <= '9') || ((h | 32) >= 'a' && (h | 32) <= 'f'))) { c.qrBits.clear(); break; }  // non-hex = corrupt line, drop
+    }
   }
   if (d["palettes"].is<JsonObject>()) {
     JsonVariant p = d["palettes"];
@@ -142,9 +157,11 @@ bool configFromJson(const std::string& json, Config& c) {
       for (JsonObject po : p["custom"].as<JsonArray>()) {
         if (c.customPalettes.size() >= (size_t)MAX_CUSTOM) break;
         Palette pl;
-        if (po["name"].is<const char*>()) pl.name = po["name"].as<std::string>();
-        for (JsonVariant col : po["colors"].as<JsonArray>())
+        if (po["name"].is<const char*>()) { pl.name = po["name"].as<std::string>(); clampStr(pl.name, CFG_PAL_NAME_MAX); }
+        for (JsonVariant col : po["colors"].as<JsonArray>()) {
+          if (pl.colors.size() >= CFG_PAL_COLORS_MAX) break;   // the LUT walks at most 5 stops; extras are dead weight in NVS
           pl.colors.push_back(hexToRgb565(col.as<std::string>()));
+        }
         c.customPalettes.push_back(pl);
       }
     }

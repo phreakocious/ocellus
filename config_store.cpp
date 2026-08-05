@@ -9,11 +9,15 @@ void loadConfig(Config& c) {
   if (s.length()) configFromJson(std::string(s.c_str()), c);
 }
 
-void saveConfig(const Config& c) {
+bool saveConfig(const Config& c) {
   Preferences p;
   p.begin("ocellus", false);
-  p.putString("cfg", configToJson(c).c_str());
+  // putString returns bytes written; 0 = nvs_set_str failed (its 4000 B string cap, or a full
+  // partition) with the OLD value left intact -- the unit then runs the new config from RAM and
+  // silently reverts at reboot. The caller must surface a false, not echo success.
+  size_t wrote = p.putString("cfg", configToJson(c).c_str());
   p.end();
+  return wrote != 0;
 }
 
 uint32_t treatsLoad() {

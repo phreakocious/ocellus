@@ -2,7 +2,8 @@
 #include "config.h"
 
 void loadConfig(Config& c);        // reads NVS "ocellus"/"cfg"; leaves defaults if absent
-void saveConfig(const Config& c);  // writes config JSON to NVS
+bool saveConfig(const Config& c);  // writes config JSON to NVS; false = NVS refused the write
+                                   // (nvs_set_str hard-fails at 4000 B, old value kept)
 
 uint32_t treatsLoad();          // treatcat lifetime treat counter; 0 on blank NVS
 void     treatsSave(uint32_t treats);

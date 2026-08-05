@@ -8,6 +8,18 @@ struct Palette {
   std::vector<uint16_t> colors;   // RGB565
 };
 
+// Decode caps, enforced in configFromJson. The whole config persists as ONE string in NVS, and
+// nvs_set_str hard-fails at 4000 B (old value kept, echo-verify blind to it) -- so a maximal legal
+// config must serialize well under that. test_config builds the maximal config and asserts
+// configToJson stays under 3900 B; adding a field or raising a cap must keep that test green.
+constexpr size_t CFG_NAME_MAX       = 24;   // display copy; matrix rain has 24 columns to weave it into
+constexpr size_t CFG_MODE_STR_MAX   = 8;    // startup.mode / splashStyle: known values are <= 6 chars
+constexpr size_t CFG_QR_TEXT_MAX    = 560;  // QR v18 ECC-M byte capacity; longer can't encode at <= 89 modules
+constexpr int    CFG_QR_SIZE_MAX    = 89;   // modules = QR version 18; past that qrBits outgrows the 2048 B serial line
+constexpr size_t CFG_QR_BITS_MAX    = 1982; // ceil(89*89/8)*2 hex chars
+constexpr size_t CFG_PAL_NAME_MAX   = 24;   // config.html slot label
+constexpr size_t CFG_PAL_COLORS_MAX = 5;    // buildPaletteLUT gradient contract: 1..5 stops (palette.h)
+
 struct Config {
   std::string name = "ocellus";
   uint8_t  brightness = 40;
@@ -41,7 +53,7 @@ struct Config {
   uint16_t paletteRotateSec = 30;
   std::vector<Palette> customPalettes; // cap 4
   std::string qrText = "https://nullphase.net/oc/";  // QR source URL/text; persisted so config.html prefills -- device ignores it
-  uint8_t     qrSize = 25;             // QR modules per side (21..177); 0 = unconfigured. Default = the qrBits below.
+  uint8_t     qrSize = 25;             // QR modules per side (21..CFG_QR_SIZE_MAX); 0 = unconfigured. Default = the qrBits below.
   // Default QR = qrText above, encoded by config.html's qrEncode (auto version, ECC M), so a fresh
   // device's QR mode (id 34) works out of the box until re-encoded in config.html. 25x25 = 158 hex.
   std::string qrBits = "feb2bfc144506ebd4bb74195dbaeeaec11b107faaafe005e009fbb4bee01afa0ec69330b57f5f59b0c4a2c4b4d7f3f1aa56da3cefb004e45bfac2a305eb13babbf85d7f70ee8553f045637feb8e480";
