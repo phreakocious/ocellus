@@ -14,7 +14,7 @@ static float distToCenter(int x, int y) {
 // so a random-looking entry always lands perfectly in order. If this holds, the reveal can't cheat.
 void test_lands_exactly_on_ordered_slots() {
   Trajectories T;
-  compute(T, 5, 0xC0FFEE);
+  compute(T, "abcde", 5, 0xC0FFEE);
   for (int i = 0; i < T.count; i++) {
     int last = T.frames[i] - 1;
     TEST_ASSERT_EQUAL_INT16(T.slotX[i], T.x[i][last]);
@@ -25,7 +25,7 @@ void test_lands_exactly_on_ordered_slots() {
 // Slots read left-to-right in name order (i increasing => x increasing) -> "the right order".
 void test_slots_left_to_right() {
   Trajectories T;
-  compute(T, 8, 42);
+  compute(T, "ocellus!", 8, 42);
   for (int i = 1; i < T.count; i++)
     TEST_ASSERT_TRUE(T.slotX[i] > T.slotX[i - 1]);
 }
@@ -34,7 +34,7 @@ void test_slots_left_to_right() {
 // inside it. Guards against a sim that never left (would enter mid-screen) or a bad cap.
 void test_enters_offscreen_lands_onscreen() {
   Trajectories T;
-  compute(T, 6, 12345);
+  compute(T, "kitten", 6, 12345);
   for (int i = 0; i < T.count; i++) {
     TEST_ASSERT_TRUE(distToCenter(T.x[i][0], T.y[i][0]) >= 120.0f);          // entry off-screen
     int last = T.frames[i] - 1;
@@ -67,7 +67,7 @@ void test_animation_length_sane() {
   int shortest = MAX_FRAMES;
   for (uint32_t seed = 1; seed <= 4000; seed++) {
     Trajectories T;
-    compute(T, (int)(seed % 12) + 2, seed);
+    compute(T, "phreakociousmeow", (int)(seed % 12) + 2, seed);
     TEST_ASSERT_TRUE(T.maxFrames >= 20);
     TEST_ASSERT_TRUE(T.maxFrames <= MAX_FRAMES);   // in-bounds: guards the OOB write, not the tuning
     if (T.maxFrames > 190) over190++;
@@ -88,8 +88,8 @@ void test_animation_length_sane() {
 // Same seed reproduces (deterministic LCG, not Arduino random()).
 void test_deterministic() {
   Trajectories A, B;
-  compute(A, 7, 999);
-  compute(B, 7, 999);
+  compute(A, "seventy", 7, 999);
+  compute(B, "seventy", 7, 999);
   for (int i = 0; i < A.count; i++) {
     TEST_ASSERT_EQUAL_INT(A.frames[i], B.frames[i]);
     TEST_ASSERT_EQUAL_INT16(A.x[i][0], B.x[i][0]);
@@ -99,19 +99,24 @@ void test_deterministic() {
 // Long names clamp to the buffer instead of overflowing.
 void test_clamps_letter_count() {
   Trajectories T;
-  compute(T, 40, 7);
+  compute(T, "phreakociousmeow", 40, 7);
   TEST_ASSERT_EQUAL_INT(MAX_LETTERS, T.count);
 }
 
 // The ladder: bigger glyphs for short names, shrinking only as far as a long name forces.
 // Boundaries are the point -- midpoints alone would not catch an off-by-one in the loop bound.
-// Re-pinned 2026-08-04 for per-pair spacing: len 6, 8 and 13-14 each dropped one rung -- their
-// old sizes needed >pi of non-overlapping arc, i.e. they only ever "fit" by overlapping.
+// Ink-kerned spacing makes the ladder name-dependent, so it is pinned for reference-name
+// prefixes. The kerning bought back every rung the cell-box interim fix cost: these are the
+// same boundaries the original width-spaced ladder had, now without the overlap that ladder
+// hid.
 void test_scale_ladder_matches_name_length() {
-  const int expect[17] = { 0, 4,4,4,4,4, 3,3, 2,2,2,2,2, 1,1,1,1 };
-  //  index:                  1 2 3 4 5  6 7  8 ...   12  13..16
+  const char* ref = "phreakociousmeow";
+  const int expect[17] = { 0, 4,4,4,4,4,4, 3,3, 2,2,2,2,2,2, 1,1 };
+  //  index:                  1 2 3 4 5 6  7 8  9 ...    14  15,16
   for (int len = 1; len <= 16; len++)
-    TEST_ASSERT_EQUAL_INT(expect[len], scaleFor(len));
+    TEST_ASSERT_EQUAL_INT(expect[len], scaleFor(ref, len));
+  // Wide ink packs looser than lowercase: capitals may drop a rung sooner, never climb higher.
+  TEST_ASSERT_TRUE(scaleFor("WWWWWWWWWWWWWWWW", 16) <= scaleFor(ref, 16));
 }
 
 // The GLYPH BOX may never cross the round rim. The glow halo is allowed to, by owner decision
@@ -125,10 +130,11 @@ void test_scale_ladder_matches_name_length() {
 // GFX 5.0f*ts constant left in by mistake. Deriving the corners from the font dimensions
 // instead breaks that circularity.
 void test_glyph_corners_stay_inside_the_rim() {
+  const char* ref = "phreakociousmeow";
   for (int len = 1; len <= MAX_LETTERS; len++) {
     Trajectories T;
-    compute(T, len, 4242);
-    const int s    = geometryFor(len).scale;
+    compute(T, ref, len, 4242);
+    const int s    = geometryFor(ref, len).scale;
     const float hw = VGA_FONT_W * 0.5f * s;   // glyph box half-width  (halo excluded, see above)
     const float hh = VGA_FONT_H * 0.5f * s;   // glyph box half-height
     for (int i = 0; i < T.count; i++)
@@ -139,22 +145,36 @@ void test_glyph_corners_stay_inside_the_rim() {
   }
 }
 
-// Adjacent glyph BOXES may never overlap. Axis-aligned equal boxes are separated iff they are
-// W apart in x OR H apart in y -- the criterion the spacing solver must meet on the STEEP parts
-// of the arc too, where neighbors separate mostly vertically and the glyph is FONT_H tall, not
-// FONT_W wide. Width-only spacing passed every other test here while piling "Phre" into a heap
-// on glass (2026-08-04 photo). Strict boxes, no ARC_SPACING margin: the margin is headroom for
-// the solver's finite iteration, not part of the invariant.
-void test_adjacent_glyphs_never_overlap() {
-  for (int len = 2; len <= MAX_LETTERS; len++) {
-    Trajectories T;
-    compute(T, len, 77);
-    const int s   = geometryFor(len).scale;
-    const float W = (float)(VGA_FONT_W * s), H = (float)(VGA_FONT_H * s);
-    for (int i = 1; i < T.count; i++) {
-      float dx = fabsf((float)T.slotX[i] - (float)T.slotX[i - 1]);
-      float dy = fabsf((float)T.slotY[i] - (float)T.slotY[i - 1]);
-      TEST_ASSERT_TRUE_MESSAGE(dx >= W || dy >= H, "adjacent glyph boxes overlap");
+// Adjacent glyph INK may never overlap, and letters may never drift far apart either -- the
+// two failure modes seen on glass the same day (2026-08-04): width-only spacing piled "Phre"
+// into a heap up the left side; the cell-box interim fix then exiled the end letters behind a
+// glyph-height of empty ascender/descender whitespace ("the p and s are far from the other
+// letters"). Ink rects come from the same bitmaps the blitter draws, placed exactly as
+// drawLetter places them (cell centered on the slot), so this asserts what the eye sees:
+// no touching, no exile. The far bound is cell height + margin + rounding -- the worst a
+// descender-meets-ascender pair (p over h) can legitimately need.
+void test_adjacent_glyphs_snug_but_never_overlapping() {
+  const char* names[] = { "phreakociousmeow", "phreakocious", "ocellus", "WWWWWWWWWWWWWWWW" };
+  for (const char* name : names) {
+    int full = 0; while (name[full]) full++;
+    for (int len = 2; len <= full; len++) {
+      Trajectories T;
+      compute(T, name, len, 77);
+      const int s = geometryFor(name, len).scale;
+      for (int i = 1; i < T.count; i++) {
+        InkBox A = inkBoxFor(name[i - 1]), B = inkBoxFor(name[i]);
+        // ink rect edges in px, [x0,x1) x [y0,y1), cell centered on the slot
+        float aL = T.slotX[i-1] + (A.x0 - 4) * s, aR = T.slotX[i-1] + (A.x1 + 1 - 4) * s;
+        float aT = T.slotY[i-1] + (A.y0 - 8) * s, aB = T.slotY[i-1] + (A.y1 + 1 - 8) * s;
+        float bL = T.slotX[i]   + (B.x0 - 4) * s, bR = T.slotX[i]   + (B.x1 + 1 - 4) * s;
+        float bT = T.slotY[i]   + (B.y0 - 8) * s, bB = T.slotY[i]   + (B.y1 + 1 - 8) * s;
+        TEST_ASSERT_TRUE_MESSAGE(aR <= bL || bR <= aL || aB <= bT || bB <= aT,
+                                 "adjacent glyph ink overlaps");
+        float dx = (float)(T.slotX[i] - T.slotX[i-1]), dy = (float)(T.slotY[i] - T.slotY[i-1]);
+        TEST_ASSERT_TRUE_MESSAGE(dx * dx + dy * dy <=
+                                 (float)((VGA_FONT_H + 3) * s) * ((VGA_FONT_H + 3) * s),
+                                 "adjacent letters drifted apart");
+      }
     }
   }
 }
@@ -169,6 +189,6 @@ int main(int, char**) {
   RUN_TEST(test_clamps_letter_count);
   RUN_TEST(test_scale_ladder_matches_name_length);
   RUN_TEST(test_glyph_corners_stay_inside_the_rim);
-  RUN_TEST(test_adjacent_glyphs_never_overlap);
+  RUN_TEST(test_adjacent_glyphs_snug_but_never_overlapping);
   return UNITY_END();
 }

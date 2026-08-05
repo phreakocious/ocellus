@@ -51,12 +51,10 @@ struct Trajectories {
 inline uint32_t lcg(uint32_t& s) { s = s * 1664525u + 1013904223u; return s; }
 inline float    frand(uint32_t& s) { return (lcg(s) >> 8) * (1.0f / 16777216.0f); }  // [0,1)
 
-constexpr float ARC_SPACING  = 1.15f;   // pair separation margin (slight gap; also the solver's headroom)
 constexpr float ARC_SPAN_MAX = 2.9f;    // rad: cap total arc width (~166deg) so it stays a bottom arc.
-                                        // Sized from the measured span table (2026-08-04): 12 letters
-                                        // at 2x need 2.817 rad with correct pair spacing; the next
-                                        // rung up at each boundary needs >pi, i.e. was only ever
-                                        // "fitting" by overlapping.
+                                        // The pair margin lives in pairChord (2 font px of ink-to-ink
+                                        // whitespace); the cap only decides how far up the sides a
+                                        // long name may climb before dropping a font size.
 
 // Glyph collision radius: half-diagonal of the scale * (VGA_FONT_W x VGA_FONT_H) cell. Derived
 // from the font constants rather than a literal so it cannot drift if the font is re-baked.
@@ -66,31 +64,64 @@ inline float glyphRadiusFor(int scale) {
   return sqrtf(hw * hw + hh * hh);
 }
 
-// Chord needed between neighbor centers at `uMid` radians from straight-down. Axis-aligned
-// equal boxes are separated iff W apart in x OR H apart in y; the neighbor direction is the
-// local tangent, so |dx| = c*cos(u), |dy| = c*sin(u). Width-only spacing (the 2026-08-02 form)
-// met the x criterion only where the arc is flat -- up the sides neighbors separate mostly
-// VERTICALLY, where the glyph is FONT_H tall, and 12-letter names piled "Phre" into a heap on
-// glass. The min picks whichever axis separates cheaper at this point on the arc.
-inline float pairChord(float uMid, int scale) {
-  float w = ARC_SPACING * VGA_FONT_W * scale, h = ARC_SPACING * VGA_FONT_H * scale;
+// Ink bounding box of one glyph in font pixels, inclusive; the cell center is (4, 8). Spacing
+// must use INK, not the 8x16 cell: the cell reserves ascender/descender rows most glyphs never
+// touch, so cell-box spacing left a glyph-height of empty whitespace between x-height letters
+// stacked up the arc's steep ends ("the p and s are far from the other letters", 2026-08-04).
+// Empty glyphs (space, unbaked codes) get a thin virtual box so a gap still advances the arc.
+struct InkBox { int8_t x0, x1, y0, y1; };
+inline InkBox inkBoxFor(char ch) {
+  InkBox b{3, 4, 7, 8};
+  uint8_t u = (uint8_t)ch;
+  if (u < VGA_FONT_FIRST || u > VGA_FONT_LAST) return b;
+  const uint8_t* rows = VGA_FONT[u - VGA_FONT_FIRST];
+  int x0 = VGA_FONT_W, x1 = -1, y0 = VGA_FONT_H, y1 = -1;
+  for (int r = 0; r < VGA_FONT_H; r++) {
+    uint8_t bits = rows[r];
+    if (!bits) continue;
+    if (r < y0) y0 = r;
+    y1 = r;
+    for (int c = 0; c < VGA_FONT_W; c++)
+      if (bits & (0x80 >> c)) { if (c < x0) x0 = c; if (c > x1) x1 = c; }
+  }
+  if (y1 >= 0) { b.x0 = (int8_t)x0; b.x1 = (int8_t)x1; b.y0 = (int8_t)y0; b.y1 = (int8_t)y1; }
+  return b;
+}
+
+// Chord needed between the cell centers of letters a (earlier) and b (next) at `uMid` radians
+// from straight-down. The neighbor direction is the local tangent: |dx| = c*cos(u) rightward,
+// |dy| = c*sin(u) -- DOWNWARD on the left half (uMid > 0: the next letter sits lower) and
+// upward on the right. Ink rects are clear iff separated in x OR y, so take the cheaper axis.
+// History, both directions of wrong: width-only spacing (2026-08-02) piled "Phre" into a heap
+// up the left side; cell-height spacing (the first fix) exiled the end letters. The margin is
+// additive ink-to-ink whitespace -- 2 font px reads like the bottom row's classic gap (typical
+// ink is 6-7 px wide in the 8 px cell, so 2 px of air ~= the old 1.15 * cell-width spacing).
+inline float pairChord(char a, char b, float uMid, int scale) {
+  InkBox A = inkBoxFor(a), B = inkBoxFor(b);
+  const float m = 2.0f * scale;                       // ink-to-ink whitespace, px
   float cu = fabsf(cosf(uMid)), su = fabsf(sinf(uMid));
-  float byX = (cu > 1e-4f) ? w / cu : 1e9f;
-  float byY = (su > 1e-4f) ? h / su : 1e9f;
-  return byX < byY ? byX : byY;
+  float needX = (float)(A.x1 - B.x0 + 1) * scale + m; // A's right edge clear of B's left
+  float needY = (uMid > 0.0f)
+      ? (float)(A.y1 - B.y0 + 1) * scale + m          // b below a: A's bottom clear of B's top
+      : (float)(B.y1 - A.y0 + 1) * scale + m;         // b above a: B's bottom clear of A's top
+  float byX = (needX <= 0.0f) ? 0.0f : (cu > 1e-4f ? needX / cu : 1e9f);
+  float byY = (needY <= 0.0f) ? 0.0f : (su > 1e-4f ? needY / su : 1e9f);
+  float c = byX < byY ? byX : byY;
+  float cmin = 4.0f * scale;                          // half a cell: keeps the arc progressing even
+  return c > cmin ? c : cmin;                         // when disjoint inks would allow a pile-up
 }
 
 // Slot offsets from straight-down (radians, positive = left), non-uniform: each pair's gap is
-// solved for ITS place on the arc. Fixed point from the width-based seed: angles grow chords,
-// chords grow angles, monotone and bounded (a chord never exceeds max(W,H)*ARC_SPACING), so 4
-// passes converge well under the ARC_SPACING margin. Returns the total span. Shared by the size
-// picker and computeSlots so they can never disagree. Boot-only trig, same license as the
-// sqrtf note above.
-inline float slotOffsets(int len, int scale, float* u) {
+// solved for ITS letters at ITS place on the arc -- the arc is kerned. Fixed point: angles
+// place the pairs, pairs re-price their chords, 4 passes settle well inside the 2 px ink
+// margin (chords are bounded by cell height + margin, and each pass is a contraction on the
+// smooth chord field). Returns the total span. Shared by the size picker and computeSlots so
+// they can never disagree. Boot-only trig, same license as the sqrtf note above.
+inline float slotOffsets(const char* name, int len, int scale, float* u) {
   float glyphR = glyphRadiusFor(scale), rArc = 120.0f - glyphR - 4.0f;
   float step[MAX_LETTERS];
   int np = len - 1;
-  float seed = (ARC_SPACING * (float)VGA_FONT_W * scale) / rArc;
+  float seed = ((float)VGA_FONT_W * scale) / rArc;
   for (int k = 0; k < np; k++) step[k] = seed;
   float span = 0.0f;
   for (int it = 0; it < 4; it++) {
@@ -98,7 +129,7 @@ inline float slotOffsets(int len, int scale, float* u) {
     float a = span * 0.5f;
     for (int i = 0; i < len; i++) { u[i] = a; if (i < np) a -= step[i]; }
     for (int k = 0; k < np; k++) {
-      float c = pairChord((u[k] + u[k + 1]) * 0.5f, scale);
+      float c = pairChord(name[k], name[k + 1], (u[k] + u[k + 1]) * 0.5f, scale);
       if (c > 2.0f * rArc) c = 2.0f * rArc;
       step[k] = 2.0f * asinf(c / (2.0f * rArc));
     }
@@ -110,23 +141,21 @@ inline float slotOffsets(int len, int scale, float* u) {
 }
 
 // Largest font scale whose whole arc still fits within ARC_SPAN_MAX -- readable glyphs,
-// shrinking only as far as a long name forces. The span now grows non-linearly (end pairs cost
-// more arc than bottom pairs), so the ladder is whatever slotOffsets yields under the cap; the
-// unit test pins the resulting boundaries. Note the correct spacing makes some old rungs
-// PHYSICALLY unreachable: 14 letters at 2x need ~3.3 rad of non-overlapping arc -- past
-// horizontal -- so very long names drop a size rather than pile up. Widening the cap still
-// costs nothing at the rim: the worst glyph-box corner is rArc + glyphR = 116.0 at every scale.
-inline int scaleFor(int len) {
+// shrinking only as far as THIS name forces (ink-kerned spacing makes the ladder name-
+// dependent: "phreakocious" packs tighter than twelve capital Ws). The unit test pins the
+// boundaries for reference names. Widening the cap still costs nothing at the rim: the worst
+// glyph-box corner is rArc + glyphR = 116.0 at every scale.
+inline int scaleFor(const char* name, int len) {
   float u[MAX_LETTERS];
   for (int s = 4; s > 1; s--)
-    if (slotOffsets(len, s, u) <= ARC_SPAN_MAX) return s;
+    if (slotOffsets(name, len, s, u) <= ARC_SPAN_MAX) return s;
   return 1;
 }
 
-inline Geometry geometryFor(int len) {
+inline Geometry geometryFor(const char* name, int len) {
   Geometry g;
   g.cx = 120; g.cy = 120; g.R = 120;
-  g.scale = scaleFor(len);
+  g.scale = scaleFor(name, len);
   g.glyphR = glyphRadiusFor(g.scale);
   g.rArc = g.R - g.glyphR - 4.0f;   // ride the bottom rim, glyph fully on-screen
   g.gravity = 0.5f;
@@ -135,10 +164,10 @@ inline Geometry geometryFor(int len) {
 }
 
 // Slot centers along the bottom arc, name order left-to-right. One-time trig (boot only).
-inline void computeSlots(Trajectories& T, const Geometry& g) {
+inline void computeSlots(Trajectories& T, const char* name, const Geometry& g) {
   const float DOWN = 1.5707963f;                 // straight down (screen y grows downward)
   float u[MAX_LETTERS];
-  slotOffsets(T.count, g.scale, u);              // same spacing the size picker solved against
+  slotOffsets(name, T.count, g.scale, u);        // same spacing the size picker solved against
   for (int i = 0; i < T.count; i++) {
     float a = DOWN + u[i];                       // u[0] positive = leftmost letter
     T.slotX[i] = (int16_t)lroundf(g.cx + g.rArc * cosf(a));
@@ -204,14 +233,15 @@ inline void simLetter(Trajectories& T, int i, const Geometry& g, uint32_t& seed)
   T.frames[i] = m;
 }
 
-// Compute the whole reveal. `len` letters, `seed` for the random entries. Caller renders the
-// glyphs (this owns only geometry + motion). Returns by filling T.
-inline void compute(Trajectories& T, int len, uint32_t seed) {
+// Compute the whole reveal. `name` supplies the glyphs the kerned spacing measures; `len` may
+// be shorter than the string but never longer. Caller renders the glyphs (this owns only
+// geometry + motion). Returns by filling T.
+inline void compute(Trajectories& T, const char* name, int len, uint32_t seed) {
   if (len < 1) len = 1;
   if (len > MAX_LETTERS) len = MAX_LETTERS;
   T.count = len;
-  Geometry g = geometryFor(len);
-  computeSlots(T, g);
+  Geometry g = geometryFor(name, len);
+  computeSlots(T, name, g);
   T.maxFrames = 0;
   for (int i = 0; i < len; i++) {
     simLetter(T, i, g, seed);

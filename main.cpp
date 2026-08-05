@@ -1423,8 +1423,8 @@ void bounceSplash(const std::string& rawName) {
   }
 
   static bounce::Trajectories T;             // ~13KB -> static, never on the stack
-  bounce::compute(T, len, esp_random());
-  const int s  = bounce::geometryFor(len).scale;
+  bounce::compute(T, name.c_str(), len, esp_random());
+  const int s  = bounce::geometryFor(name.c_str(), len).scale;
   const int go = s;    // glow offset: holds the halo at 1/8 of glyph width at every scale
 
   uint16_t core[40], glow[40];
