@@ -17,9 +17,18 @@ constexpr int      BATT_CUTOFF_SAMPLES   = 3;      // ...this many times consecu
 constexpr uint32_t BATT_SPLASH_REPEAT_MS = 5 * 60 * 1000;
 constexpr int      BATT_USB_ON_MV        = 4150;   // EMA at/above -> charger holds/floats the cell: USB present
 constexpr int      BATT_USB_OFF_MV       = 4100;   // EMA back below -> unplugged (the board's own load sags even a full cell under this)
-constexpr int      BATT_CHG_STEP_MV      = 40;     // plug/unplug I*R step between consecutive ~5s RAW samples (differential:
-                                                   // per-unit ADC offset cancels, unlike the absolute latch above)
-constexpr int      BATT_CHG_HOLD_MV      = 5;      // EMA must climb this much per hold window or the chg flag self-heals off
+constexpr int      BATT_CHG_STEP_MV      = 40;     // plug I*R step between consecutive ~5s RAW samples (differential:
+                                                   // per-unit ADC offset cancels, unlike the absolute latch above).
+                                                   // MEASURED 2026-08-04 (batlog ring, full cell): plug step +46 --
+                                                   // and full float is the SMALLEST plausible step (taper current;
+                                                   // a drained cell steps harder), so 40 catches the worst case with
+                                                   // 3x margin over the +/-12 on-battery sample noise. The UNPLUG
+                                                   // step measured only -19 at full charge -- this threshold can
+                                                   // never see a full-cell unplug; that is BATT_SAG_MV's job (same
+                                                   // session: EMA fell 23 in the first 60s window, rest 4164 inside
+                                                   // the latch's hysteresis band).
+constexpr int      BATT_CHG_HOLD_MV      = 5;      // EMA must climb this much per hold window or the chg flag self-heals
+                                                   // off (measured: post-plug EMA climbed +45/window)
 constexpr uint32_t BATT_CHG_HOLD_MS      = 60000;
 constexpr int      BATT_RISE_MV          = 10;     // EMA climbing this much per window, TWICE running = charging. Catches
 constexpr int      BATT_RISE_WINDOWS     = 2;      // the case no step can (boot/reset while already plugged in: the step
@@ -30,6 +39,8 @@ constexpr int      BATT_SAG_MV           = 15;     // EMA falling this much per 
                                                    // charger holds the cell FLAT (measured +/-9mV raw noise), so a
                                                    // sustained sag can only mean VBUS is gone -- catches the unit whose
                                                    // full cell rests INSIDE the hysteresis band off-USB (measured 4125)
+
+constexpr int BATT_LOG_N = 64;   // ~5.3 min of 5s samples: covers a full unplug->replug session
 
 struct BatteryMonitor {
   void feed(int mv, uint32_t nowMs);     // one sample; nowMs only anchors the splash cadence
@@ -42,6 +53,14 @@ struct BatteryMonitor {
                                                  // reply's own mv is a fresh ADC read taken at reply time, so it
                                                  // is NOT what the detector saw -- these two fields are the only
                                                  // way to read a step decision from outside (field calibration).
+  // Sample ring for the plug/unplug calibration session ({"cmd":"batlog"}): raw + EMA per feed,
+  // dumped over serial AFTER replug. An unplugged unit has no serial, so this is the only way to
+  // see the transient the STEP/HOLD thresholds guess at. logTotal detects a reboot mid-session
+  // (RAM ring: a reset would restart it near zero and the dump would be silently short).
+  int      logSize() const { return logTotal < BATT_LOG_N ? (int)logTotal : BATT_LOG_N; }
+  uint32_t logCount() const { return logTotal; }
+  int  logMvAt(int i) const  { return logMv[idx(i)]; }    // i = 0 oldest .. logSize()-1 newest
+  int  logEmaAt(int i) const { return logEma[idx(i)]; }
  private:
   BattState st = BATT_NORMAL;
   int      ema = 0;                      // 0 = unseeded (readBatteryMv already averages 8 ADC reads)
@@ -56,4 +75,11 @@ struct BatteryMonitor {
                                          // otherwise leave slopeMs falsy and re-anchor forever
   uint8_t  riseRun = 0;                  // consecutive windows the EMA climbed >= BATT_RISE_MV
   uint32_t lastSplashMs = 0;
+  uint16_t logMv[BATT_LOG_N] = {};
+  uint16_t logEma[BATT_LOG_N] = {};
+  uint32_t logTotal = 0;
+  int idx(int i) const {                 // ring index of the i-th oldest retained sample
+    uint32_t base = logTotal < BATT_LOG_N ? 0 : logTotal - BATT_LOG_N;
+    return (int)((base + (uint32_t)i) % BATT_LOG_N);
+  }
 };

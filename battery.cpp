@@ -1,6 +1,9 @@
 #include "battery.h"
 
 void BatteryMonitor::feed(int mv, uint32_t nowMs) {
+  logMv[logTotal % BATT_LOG_N] = (uint16_t)(mv < 0 ? 0 : mv);   // raw first, EMA after this
+  logEma[logTotal % BATT_LOG_N] = (uint16_t)(ema < 0 ? 0 : ema); // feed's update: the PAIR the
+  logTotal++;                                                    // step rules actually compared
   if (mv < BATT_NO_CELL_MV) {            // no cell (USB-powered bench board): reset to inert
     st = BATT_NORMAL; ema = 0; cutRun = 0; entryPulse = false; usb = false;
     chg = false; prevMv = 0; slopeMs = 0; slopeArmed = false; riseRun = 0;   // a floating divider jumps hundreds of mV; keep the step detector inert too

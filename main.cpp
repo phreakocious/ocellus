@@ -207,10 +207,20 @@ void pollConfigSerial() {
         Serial.printf("{\"type\":\"eyeevent\",\"ev\":%d}\n", which);
         g_rxbuf.clear(); continue;
       }
-      if (g_rxbuf.find("\"cmd\":\"bat\"") != std::string::npos) {   // {"cmd":"bat"} -> battery millivolts; closing quote keeps it from matching inside "cmd":"batsim"
+      if (g_rxbuf.find("\"cmd\":\"bat\"") != std::string::npos) {   // {"cmd":"bat"} -> battery millivolts; closing quote keeps it from matching inside "cmd":"batsim"/"batlog"
         Serial.printf("{\"type\":\"bat\",\"mv\":%d,\"ema\":%d,\"prev\":%d,\"usb\":%s,\"chg\":%s}\n",
                       readBatteryMv(), gBatt.emaMv(), gBatt.prevSampleMv(),
                       gBatt.usbPowered() ? "true" : "false", gBatt.charging() ? "true" : "false");
+        g_rxbuf.clear(); continue;
+      }
+      if (g_rxbuf.find("\"cmd\":\"batlog\"") != std::string::npos) {   // dump the 5s sample ring: the plug/unplug
+        Serial.printf("{\"type\":\"batlog\",\"count\":%u,\"mv\":[", (unsigned)gBatt.logCount());   // transient calibration an unplugged
+        for (int i = 0; i < gBatt.logSize(); i++)                      // unit can't stream live. count detects a
+          Serial.printf(i ? ",%d" : "%d", gBatt.logMvAt(i));           // reboot mid-session (RAM ring restarts).
+        Serial.print("],\"ema\":[");
+        for (int i = 0; i < gBatt.logSize(); i++)
+          Serial.printf(i ? ",%d" : "%d", gBatt.logEmaAt(i));
+        Serial.println("]}");
         g_rxbuf.clear(); continue;
       }
       {   // {"cmd":"pet"} / {"cmd":"petsim","full":N,"en":N} -> read or force the pet stats

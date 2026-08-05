@@ -248,8 +248,23 @@ void test_chg_survives_the_window_after_a_deep_unplug_sag() {
   TEST_ASSERT_TRUE(b.charging());                                    // must not have been cleared
 }
 
+// The calibration ring records the exact (raw, pre-update EMA) pair each feed compared, oldest
+// first, and keeps only the last BATT_LOG_N. logCount keeps counting past the ring so a
+// mid-session reboot (RAM ring restarts near zero) is detectable from the dump.
+void test_log_ring_records_and_wraps() {
+  BatteryMonitor b;
+  for (int i = 0; i < BATT_LOG_N + 10; i++) b.feed(3700 + i, (uint32_t)(i + 1) * 5000);
+  TEST_ASSERT_EQUAL_INT(BATT_LOG_N, b.logSize());
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)(BATT_LOG_N + 10), b.logCount());
+  TEST_ASSERT_EQUAL_INT(3700 + 10, b.logMvAt(0));                  // oldest retained = feed #10
+  TEST_ASSERT_EQUAL_INT(3700 + BATT_LOG_N + 9, b.logMvAt(BATT_LOG_N - 1));
+  TEST_ASSERT_EQUAL_INT(0, [] { BatteryMonitor f; f.feed(3700, 5000); return f.logEmaAt(0); }());
+  // ^ first feed logs EMA 0 (unseeded): the log holds what the step rules SAW, not the result
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_log_ring_records_and_wraps);
   RUN_TEST(test_no_cell_is_inert);
   RUN_TEST(test_unplugging_cell_recovers_from_low);
   RUN_TEST(test_hysteresis_low_then_recover_then_low);
