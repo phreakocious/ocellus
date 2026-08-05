@@ -7,7 +7,7 @@
 #
 # The firmware is generic across all units -- per-unit tailoring is the Web
 # Serial config (nullphase.net/oc/), not a reflash -- so this one image serves every
-# unit. User flow: open the URL in Chrome/Edge, click Install, pick the port.
+# unit. User flow: open the URL in Chrome/Edge/Firefox 151+, click Install, pick the port.
 #
 # Requires: the PlatformIO venv at ~/.platformio, and ssh/scp access to the server.
 set -euo pipefail

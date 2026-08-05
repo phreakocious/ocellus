@@ -6,6 +6,7 @@
 <title>Flash ocellus</title>
 <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
 <script type="module" src="./jelly.js"></script>
+<script>setTimeout(() => document.documentElement.classList.add('nojelly'), 2000);</script>
 <style>
   :root { color-scheme: dark; }
   body {
@@ -30,6 +31,10 @@
   /* ponytail: :not(:defined) fallback — until jelly.js registers (or if the vendored
      file ever fails to load) the layout stays sane and the Install button still works. */
   jelly-theme:not(:defined), jelly-card:not(:defined) { display: block; }
+  /* Hidden until jelly.js registers — kills the unstyled→styled pop. html.nojelly is
+     the 2 s escape valve (head script): a dead jelly.js reveals the fallback above. */
+  jelly-theme:not(:defined) { visibility: hidden; }
+  html.nojelly jelly-theme:not(:defined) { visibility: visible; }
   jelly-button:not(:defined) {
     display: inline-block; background: #2563eb; color: #fff; border: 0;
     border-radius: 10px; padding: .7rem 1.4rem; font: inherit; font-weight: 600; cursor: pointer;
@@ -45,13 +50,13 @@
 
   <ol>
     <li><b>macOS only:</b> install the <a href="https://files.waveshare.com/wiki/common/CH34XSER_MAC.7z">CH34x USB driver</a> (unzip, run it, approve in System Settings &rarr; Privacy &amp; Security, reboot if asked). Windows and Linux need no driver.</li>
-    <li>Plug the board into USB. Use <b>Chrome</b> or <b>Edge</b> on a computer (Safari won't work).</li>
+    <li>Plug the board into USB. Use <b>Chrome</b>, <b>Edge</b>, or <b>Firefox&nbsp;151+</b> on a computer (Safari won't work).</li>
     <li>Click <b>Install</b> below, pick the board's serial port, and let it run.</li>
   </ol>
 
   <esp-web-install-button manifest="./manifest.json">
     <jelly-button slot="activate">Install</jelly-button>
-    <span slot="unsupported" class="unsupported">Open this page in Chrome or Edge on a computer.</span>
+    <span slot="unsupported" class="unsupported">This browser has no Web Serial — use Chrome, Edge, or Firefox&nbsp;151+ on a computer. (Linux distros often ship an older Firefox ESR.)</span>
     <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS.</span>
   </esp-web-install-button>
 
@@ -72,6 +77,23 @@
 
   <p class="hint">No serial port in the picker? On macOS, finish step 1's driver.
   If it still won't appear or won't connect, hold <code>BOOT</code>, tap <code>RESET</code>, release <code>BOOT</code>, then click Install again.</p>
+
+  <p class="hint" id="linuxHint" hidden><b>Linux:</b> give yourself access to the serial port —
+  <code>sudo usermod -aG dialout $USER</code> (<code>uucp</code> on Arch), then log out and back in.
+  <span id="snapHint"></span></p>
+  <script>
+  // ponytail: UA sniff, not feature-detect — no web API reveals "snap hid /dev from us".
+  if (/Linux/.test(navigator.platform) && !/Android|CrOS/.test(navigator.userAgent)) {
+    document.getElementById('linuxHint').hidden = false;
+    const brands = navigator.userAgentData?.brands ?? [];
+    const snapRisk = /Firefox/.test(navigator.userAgent) ||
+      (brands.some(b => b.brand === 'Chromium') &&
+       !brands.some(b => /Google Chrome|Microsoft Edge/.test(b.brand)));
+    if (snapRisk) document.getElementById('snapHint').textContent =
+      "Port picker still empty? Snap-packaged browsers (Ubuntu's default Firefox and Chromium) " +
+      "can't see serial ports at all — use Google Chrome's .deb or Mozilla's Firefox .deb/tarball.";
+  }
+  </script>
 
   <p>Already flashed? <a href="../">Configure your eye &rarr;</a></p>
 </main>

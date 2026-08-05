@@ -29,7 +29,12 @@
   jelly-theme:not(:defined){display:contents} jelly-card:not(:defined){display:block}
   jelly-button:not(:defined),jelly-input:not(:defined),jelly-switch:not(:defined),jelly-select:not(:defined),jelly-slider:not(:defined){display:inline-block}
   jelly-card{display:block;margin:.6rem 0}
+  /* hidden until the inlined module registers (kills the 1-frame unstyled flash);
+     html.nojelly = 2 s escape valve if the module ever throws before registering */
+  jelly-theme:not(:defined){visibility:hidden}
+  html.nojelly jelly-theme:not(:defined){visibility:visible}
 </style>
+<script>setTimeout(() => document.documentElement.classList.add('nojelly'), 2000);</script>
 </head>
 <body>
 <jelly-theme mode="dark">
