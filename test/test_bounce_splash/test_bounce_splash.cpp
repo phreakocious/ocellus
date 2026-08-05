@@ -105,9 +105,11 @@ void test_clamps_letter_count() {
 
 // The ladder: bigger glyphs for short names, shrinking only as far as a long name forces.
 // Boundaries are the point -- midpoints alone would not catch an off-by-one in the loop bound.
+// Re-pinned 2026-08-04 for per-pair spacing: len 6, 8 and 13-14 each dropped one rung -- their
+// old sizes needed >pi of non-overlapping arc, i.e. they only ever "fit" by overlapping.
 void test_scale_ladder_matches_name_length() {
-  const int expect[17] = { 0, 4,4,4,4,4,4, 3,3, 2,2,2,2,2,2, 1,1 };
-  //  index:                  1 2 3 4 5 6  7 8  9 ...   14  15,16
+  const int expect[17] = { 0, 4,4,4,4,4, 3,3, 2,2,2,2,2, 1,1,1,1 };
+  //  index:                  1 2 3 4 5  6 7  8 ...   12  13..16
   for (int len = 1; len <= 16; len++)
     TEST_ASSERT_EQUAL_INT(expect[len], scaleFor(len));
 }
@@ -137,6 +139,26 @@ void test_glyph_corners_stay_inside_the_rim() {
   }
 }
 
+// Adjacent glyph BOXES may never overlap. Axis-aligned equal boxes are separated iff they are
+// W apart in x OR H apart in y -- the criterion the spacing solver must meet on the STEEP parts
+// of the arc too, where neighbors separate mostly vertically and the glyph is FONT_H tall, not
+// FONT_W wide. Width-only spacing passed every other test here while piling "Phre" into a heap
+// on glass (2026-08-04 photo). Strict boxes, no ARC_SPACING margin: the margin is headroom for
+// the solver's finite iteration, not part of the invariant.
+void test_adjacent_glyphs_never_overlap() {
+  for (int len = 2; len <= MAX_LETTERS; len++) {
+    Trajectories T;
+    compute(T, len, 77);
+    const int s   = geometryFor(len).scale;
+    const float W = (float)(VGA_FONT_W * s), H = (float)(VGA_FONT_H * s);
+    for (int i = 1; i < T.count; i++) {
+      float dx = fabsf((float)T.slotX[i] - (float)T.slotX[i - 1]);
+      float dy = fabsf((float)T.slotY[i] - (float)T.slotY[i - 1]);
+      TEST_ASSERT_TRUE_MESSAGE(dx >= W || dy >= H, "adjacent glyph boxes overlap");
+    }
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_lands_exactly_on_ordered_slots);
@@ -147,5 +169,6 @@ int main(int, char**) {
   RUN_TEST(test_clamps_letter_count);
   RUN_TEST(test_scale_ladder_matches_name_length);
   RUN_TEST(test_glyph_corners_stay_inside_the_rim);
+  RUN_TEST(test_adjacent_glyphs_never_overlap);
   return UNITY_END();
 }

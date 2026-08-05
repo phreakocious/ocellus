@@ -51,8 +51,12 @@ struct Trajectories {
 inline uint32_t lcg(uint32_t& s) { s = s * 1664525u + 1013904223u; return s; }
 inline float    frand(uint32_t& s) { return (lcg(s) >> 8) * (1.0f / 16777216.0f); }  // [0,1)
 
-constexpr float ARC_SPACING  = 1.15f;   // adjacent glyph centers = 1.15 * glyph width (slight gap)
-constexpr float ARC_SPAN_MAX = 2.44f;   // rad: cap total arc width (~140deg) so it stays a bottom arc
+constexpr float ARC_SPACING  = 1.15f;   // pair separation margin (slight gap; also the solver's headroom)
+constexpr float ARC_SPAN_MAX = 2.9f;    // rad: cap total arc width (~166deg) so it stays a bottom arc.
+                                        // Sized from the measured span table (2026-08-04): 12 letters
+                                        // at 2x need 2.817 rad with correct pair spacing; the next
+                                        // rung up at each boundary needs >pi, i.e. was only ever
+                                        // "fitting" by overlapping.
 
 // Glyph collision radius: half-diagonal of the scale * (VGA_FONT_W x VGA_FONT_H) cell. Derived
 // from the font constants rather than a literal so it cannot drift if the font is re-baked.
@@ -62,26 +66,60 @@ inline float glyphRadiusFor(int scale) {
   return sqrtf(hw * hw + hh * hh);
 }
 
-// Angular gap between adjacent letters at a given font scale. rArc reserves the glyph's
-// half-diagonal so nothing clips the round edge. Shared by the size picker and computeSlots so
-// they can never disagree.
-inline float arcStepRad(int len, int scale) {
+// Chord needed between neighbor centers at `uMid` radians from straight-down. Axis-aligned
+// equal boxes are separated iff W apart in x OR H apart in y; the neighbor direction is the
+// local tangent, so |dx| = c*cos(u), |dy| = c*sin(u). Width-only spacing (the 2026-08-02 form)
+// met the x criterion only where the arc is flat -- up the sides neighbors separate mostly
+// VERTICALLY, where the glyph is FONT_H tall, and 12-letter names piled "Phre" into a heap on
+// glass. The min picks whichever axis separates cheaper at this point on the arc.
+inline float pairChord(float uMid, int scale) {
+  float w = ARC_SPACING * VGA_FONT_W * scale, h = ARC_SPACING * VGA_FONT_H * scale;
+  float cu = fabsf(cosf(uMid)), su = fabsf(sinf(uMid));
+  float byX = (cu > 1e-4f) ? w / cu : 1e9f;
+  float byY = (su > 1e-4f) ? h / su : 1e9f;
+  return byX < byY ? byX : byY;
+}
+
+// Slot offsets from straight-down (radians, positive = left), non-uniform: each pair's gap is
+// solved for ITS place on the arc. Fixed point from the width-based seed: angles grow chords,
+// chords grow angles, monotone and bounded (a chord never exceeds max(W,H)*ARC_SPACING), so 4
+// passes converge well under the ARC_SPACING margin. Returns the total span. Shared by the size
+// picker and computeSlots so they can never disagree. Boot-only trig, same license as the
+// sqrtf note above.
+inline float slotOffsets(int len, int scale, float* u) {
   float glyphR = glyphRadiusFor(scale), rArc = 120.0f - glyphR - 4.0f;
-  return (len > 1) ? (ARC_SPACING * (float)VGA_FONT_W * scale) / rArc : 0.0f;
+  float step[MAX_LETTERS];
+  int np = len - 1;
+  float seed = (ARC_SPACING * (float)VGA_FONT_W * scale) / rArc;
+  for (int k = 0; k < np; k++) step[k] = seed;
+  float span = 0.0f;
+  for (int it = 0; it < 4; it++) {
+    span = 0.0f; for (int k = 0; k < np; k++) span += step[k];
+    float a = span * 0.5f;
+    for (int i = 0; i < len; i++) { u[i] = a; if (i < np) a -= step[i]; }
+    for (int k = 0; k < np; k++) {
+      float c = pairChord((u[k] + u[k + 1]) * 0.5f, scale);
+      if (c > 2.0f * rArc) c = 2.0f * rArc;
+      step[k] = 2.0f * asinf(c / (2.0f * rArc));
+    }
+  }
+  span = 0.0f; for (int k = 0; k < np; k++) span += step[k];
+  float a = span * 0.5f;
+  for (int i = 0; i < len; i++) { u[i] = a; if (i < np) a -= step[i]; }
+  return span;
 }
 
 // Largest font scale whose whole arc still fits within ARC_SPAN_MAX -- readable glyphs,
-// shrinking only as far as a long name forces. Ladder: 1-6 -> 4x, 7-8 -> 3x, 9-14 -> 2x,
-// 15-16 -> 1x. (A 1-letter name takes 4x: arcStepRad returns 0 for len <= 1.)
-//
-// The cap is what sets those boundaries, and it cannot separate them: a 6-letter name needs
-// 2.2936 rad for 4x and a 14-letter name needs 2.4380 for 2x, so any cap clearing the second
-// clears the first. 2.44 was chosen on glass (2026-08-02) to lift BOTH -- 14 letters read too
-// small at 1x. Widening costs nothing at the rim: the worst glyph-box corner is rArc + glyphR,
-// which is 116.0 at every scale regardless of how wide the arc spreads.
+// shrinking only as far as a long name forces. The span now grows non-linearly (end pairs cost
+// more arc than bottom pairs), so the ladder is whatever slotOffsets yields under the cap; the
+// unit test pins the resulting boundaries. Note the correct spacing makes some old rungs
+// PHYSICALLY unreachable: 14 letters at 2x need ~3.3 rad of non-overlapping arc -- past
+// horizontal -- so very long names drop a size rather than pile up. Widening the cap still
+// costs nothing at the rim: the worst glyph-box corner is rArc + glyphR = 116.0 at every scale.
 inline int scaleFor(int len) {
+  float u[MAX_LETTERS];
   for (int s = 4; s > 1; s--)
-    if (arcStepRad(len, s) * (len - 1) <= ARC_SPAN_MAX) return s;
+    if (slotOffsets(len, s, u) <= ARC_SPAN_MAX) return s;
   return 1;
 }
 
@@ -99,10 +137,10 @@ inline Geometry geometryFor(int len) {
 // Slot centers along the bottom arc, name order left-to-right. One-time trig (boot only).
 inline void computeSlots(Trajectories& T, const Geometry& g) {
   const float DOWN = 1.5707963f;                 // straight down (screen y grows downward)
-  float step = arcStepRad(T.count, g.scale);     // same spacing the size picker solved against
-  float a0 = DOWN + step * (T.count - 1) * 0.5f; // largest angle = leftmost letter (i=0)
+  float u[MAX_LETTERS];
+  slotOffsets(T.count, g.scale, u);              // same spacing the size picker solved against
   for (int i = 0; i < T.count; i++) {
-    float a = a0 - step * i;
+    float a = DOWN + u[i];                       // u[0] positive = leftmost letter
     T.slotX[i] = (int16_t)lroundf(g.cx + g.rArc * cosf(a));
     T.slotY[i] = (int16_t)lroundf(g.cy + g.rArc * sinf(a));
   }
