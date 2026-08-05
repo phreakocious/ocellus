@@ -38,8 +38,8 @@
 </head>
 <body>
 <jelly-theme mode="dark">
-<h1>ocellus — Config</h1>
-<p class="note">Chrome/Edge, served from <code>localhost</code> or <code>https</code> (not <code>file://</code>). Connect the device over USB. &middot; <a href="flash/">Flash firmware &rarr;</a></p>
+<h1>ocellus — Config <span id="fw" class="note"></span></h1>
+<p class="note">Chrome, Edge, or Firefox 151+, served from <code>localhost</code> or <code>https</code> (not <code>file://</code>). Connect the device over USB. &middot; <a href="flash/">Flash firmware &rarr;</a></p>
 <div class="row">
   <jelly-button id="connect" size="sm">Connect</jelly-button>
   <jelly-button id="disconnect" size="sm" disabled>Disconnect</jelly-button>
@@ -127,7 +127,7 @@
 <dialog id="helpDlg">
   <h3>ocellus Config — Help</h3>
   <ul>
-    <li><b>Requires</b> Chrome/Edge, served from <code>localhost</code> or <code>https</code> (not <code>file://</code>). Close any other tab holding the serial port.</li>
+    <li><b>Requires</b> Chrome, Edge, or Firefox 151+, served from <code>localhost</code> or <code>https</code> (not <code>file://</code>). Close any other tab holding the serial port.</li>
     <li><b>Connect</b> → pick the device's USB serial port; the form unlocks and loads current settings.</li>
     <li><b>Live preview</b> jumps the running animation immediately. It is <i>not</i> saved — a power-cycle returns to your Startup setting.</li>
     <li><b>Save to device</b> persists everything below across reboots. <b>Reload</b> re-reads the device.</li>
@@ -5813,6 +5813,9 @@ function requestConfig() {
 }
 
 function buildCatalog(cat) {
+  // `fw` rides the catalog reply on purpose (device identity, not config -- a config field would
+  // round-trip stale through set/NVS). This is the "what version are you running?" support surface.
+  $("fw").textContent = cat.fw ? "fw " + cat.fw : "";
   const sid = $("startupId"); sid.innerHTML = "";
   const eye = $("favEye"), eff = $("favEffect"); eye.innerHTML = eff.innerHTML = "";
   const cEye = $("cycEye"), cEff = $("cycEffect"); cEye.innerHTML = cEff.innerHTML = "";
@@ -5923,12 +5926,20 @@ function readForm() {
 
 // QR (spec 2026-07-07): encode in-browser (auto version, ECC M), pack row-major MSB-first to hex;
 // the device stores the hex and blits it -- no on-device encoder. Empty text = unconfigured (size 0).
+// Device ceiling: the firmware rejects qrSize > 89 (version 18) -- a bigger grid's qrBits `set`
+// line would exceed the device's 2048 B serial line cap and can never arrive, so an uncapped
+// encode (auto-version goes to 40) turned into an opaque save failure. v18/M byte capacity = 560.
+const QR_MAX_MODULES = 89, QR_MAX_CHARS = 560;
 function qrEncode(text) {
   if (!text.trim()) return { qrText: "", qrSize: 0, qrBits: "" };
-  const qr = qrcode(0, "M");            // throws when text exceeds version 40 -- caller catches
+  const qr = qrcode(0, "M");            // auto-version, capped to 18 below -- caller catches throws
   qr.addData(text);
   qr.make();
   const n = qr.getModuleCount();
+  if (n > QR_MAX_MODULES) {
+    const e = new Error(`Too long for the device — at most ${QR_MAX_CHARS} characters fit; this is ${text.length}. Shorten the text.`);
+    e.qrTooLong = true; throw e;
+  }
   const bytes = []; let acc = 0, k = 0;
   for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
     acc = (acc << 1) | (qr.isDark(r, c) ? 1 : 0);
@@ -5948,7 +5959,7 @@ function qrRefresh() {   // -> encoded fields, or null when unencodable (leave d
   g.fillStyle = "#fff"; g.fillRect(0, 0, cv.width, cv.height);
   let enc;
   try { enc = qrEncode($("qrText").value); }
-  catch (e) { note.textContent = "Too long to encode."; return null; }
+  catch (e) { note.textContent = e.qrTooLong ? e.message : "Too long to encode."; return null; }
   if (!enc.qrSize) { note.textContent = "Empty — the QR effect will show a setup hint."; return enc; }
   const n = enc.qrSize, px = Math.max(1, Math.floor(cv.width / (n + 4))), o = Math.floor((cv.width - n * px) / 2);
   g.fillStyle = "#000";
@@ -6000,23 +6011,56 @@ async function refreshSlideList() {
   });
   if (!(r.slides || []).length) box.textContent = "No slides on device.";
 }
+// Retry the WHOLE transfer, never a single chunk -- mirrors config_cli.py's slide_upload().
+// Serial RX drops bytes during the 14 ms framebuffer flush, so a chunk line can arrive mangled
+// (measured: 5 of 12 transfers). The device tears the upload down on any chunk-level error
+// (slide_proto's fail() -> abortTmp + active=false), and re-sending a seq it already applied is
+// itself a 'bad seq' abort -- so resuming mid-stream can turn one dropped byte into a corrupt
+// slide. slide_begin resets nextSeq/got/active unconditionally: restarting from the top is safe.
+// Returns null on success, else a short failure reason.
+async function slideSendOne(idx, bytes) {
+  const CHUNK = 1024, TRIES = 3;
+  let why = "no reply";
+  for (let attempt = 1; attempt <= TRIES; attempt++) {
+    try {
+      let r = await slideRpc({ cmd: "slide_begin", index: idx });
+      if (r.type === "slide_ack") {
+        let ok = true;
+        for (let seq = 0, off = 0; ok && off < bytes.length; seq++, off += CHUNK) {
+          const b64 = btoa(String.fromCharCode.apply(null, bytes.subarray(off, off + CHUNK)));
+          r = await slideRpc({ cmd: "slide_chunk", seq, data: b64 });
+          ok = r.type === "slide_ack";
+          if (ok) $("slideProg").textContent = `Slide ${idx}: ${Math.round(100 * off / bytes.length)}%`
+            + (attempt > 1 ? ` (attempt ${attempt})` : "");
+        }
+        if (ok) { r = await slideRpc({ cmd: "slide_end" }); if (r.type === "slide_ack") return null; }
+      }
+      why = r.msg || r.type;
+    } catch (e) { why = e.message; }   // slideRpc timeout -- restart like any other failure
+    // Pause before the restart so a late reply to the abandoned attempt lands while slideResolve
+    // is null (handleLine drops it) instead of resolving the next attempt's begin -- the browser
+    // form of config_cli's reset_input_buffer() + 0.5 s.
+    if (attempt < TRIES) await new Promise(res => setTimeout(res, 500));
+  }
+  return why;
+}
 async function uploadSlides() {
   const files = $("slideFiles").files; if (!files.length) return;
-  let base = ((await slideRpc({ cmd: "slide_list" })).slides || []).length;   // append after existing
-  for (let f = 0; f < files.length; f++) {
-    const idx = base + f, bytes = await imgToRgb565(files[f]);
-    await slideRpc({ cmd: "slide_begin", index: idx });
-    const CHUNK = 1024;
-    for (let seq = 0, off = 0; off < bytes.length; seq++, off += CHUNK) {
-      const slice = bytes.subarray(off, off + CHUNK);
-      const b64 = btoa(String.fromCharCode.apply(null, slice));
-      await slideRpc({ cmd: "slide_chunk", seq, data: b64 });
-      $("slideProg").textContent = `Slide ${idx}: ${Math.round(100 * off / bytes.length)}%`;
-    }
-    await slideRpc({ cmd: "slide_end" });
+  let base = null;   // append after existing
+  try { const r = await slideRpc({ cmd: "slide_list" }); if (r.type === "slides") base = (r.slides || []).length; } catch {}
+  if (base === null) { $("slideProg").textContent = "No reply from device — reconnect and retry."; return; }
+  let ok = 0; const failed = [];
+  for (const f of files) {
+    const bytes = await imgToRgb565(f);
+    // Index by successes, not file position: a failed slide leaves no file on the device, and a
+    // hole would make the next upload's base (= count of existing) collide with a higher index.
+    const why = await slideSendOne(base + ok, bytes);
+    if (why) failed.push(`${f.name} (${why})`); else ok++;
   }
-  $("slideProg").textContent = "Upload complete.";
-  refreshSlideList();
+  $("slideProg").textContent = failed.length
+    ? `${ok} uploaded, ${failed.length} failed after 3 attempts: ${failed.join("; ")}`
+    : `Upload complete — ${ok} slide(s).`;
+  refreshSlideList().catch(() => {});
 }
 
 // --- GIF clips (animation id 48) --------------------------------------------------------------
@@ -6050,29 +6094,50 @@ async function refreshGifList() {
     ? `— ${gifs.length} clip(s), ${(r.bytes / 1e6).toFixed(2)} MB on device`
     : "No GIFs on device."));
 }
+// Same restart-from-begin discipline as slideSendOne (chunk errors abort the transfer device-side
+// and a re-sent seq is itself a 'bad seq' abort; gif_begin resets the transfer state). A permanent
+// error (bad name, no space) just fails all 3 attempts and is reported with the device's msg.
+// Returns null on success, else a short failure reason.
+async function gifSendOne(name, bytes) {
+  const CHUNK = 1024, TRIES = 3;
+  let why = "no reply";
+  for (let attempt = 1; attempt <= TRIES; attempt++) {
+    try {
+      let r = await gifRpc({ cmd: "gif_begin", name, bytes: bytes.length });
+      if (r.type === "gif_ack") {
+        let ok = true;
+        for (let seq = 0, off = 0; ok && off < bytes.length; seq++, off += CHUNK) {
+          const b64 = btoa(String.fromCharCode.apply(null, bytes.subarray(off, off + CHUNK)));
+          r = await gifRpc({ cmd: "gif_chunk", seq, data: b64 });
+          ok = r.type === "gif_ack";
+          if (ok) $("gifProg").textContent = `${name}: ${Math.round(100 * off / bytes.length)}%`
+            + (attempt > 1 ? ` (attempt ${attempt})` : "");
+        }
+        if (ok) { r = await gifRpc({ cmd: "gif_end" }); if (r.type === "gif_ack") return null; }
+      }
+      why = r.msg || r.type;
+    } catch (e) { why = e.message; }   // gifRpc timeout -- restart like any other failure
+    if (attempt < TRIES) await new Promise(res => setTimeout(res, 500));   // drop late replies (see slideSendOne)
+  }
+  return why;
+}
 async function uploadGifs() {
   const files = $("gifFiles").files; if (!files.length) return;
+  let ok = 0; const failed = [];
   for (const f of files) {
     const name = gifName(f.name);
     const bytes = new Uint8Array(await f.arrayBuffer());
     if (bytes.length > GIF_MAX_BYTES) {
-      $("gifProg").textContent = `${name}: ${(bytes.length / 1e6).toFixed(2)} MB exceeds the 2 MB cap — re-bake it shorter.`;
+      failed.push(`${name} (${(bytes.length / 1e6).toFixed(2)} MB exceeds the 2 MB cap — re-bake it shorter)`);
       continue;
     }
-    const begun = await gifRpc({ cmd: "gif_begin", name, bytes: bytes.length });
-    if (begun.type === "err") { $("gifProg").textContent = `${name}: ${begun.msg}`; continue; }
-    const CHUNK = 1024;
-    for (let seq = 0, off = 0; off < bytes.length; seq++, off += CHUNK) {
-      const slice = bytes.subarray(off, off + CHUNK);
-      const b64 = btoa(String.fromCharCode.apply(null, slice));
-      const ack = await gifRpc({ cmd: "gif_chunk", seq, data: b64 });
-      if (ack.type === "err") { $("gifProg").textContent = `${name}: ${ack.msg}`; break; }
-      $("gifProg").textContent = `${name}: ${Math.round(100 * off / bytes.length)}%`;
-    }
-    await gifRpc({ cmd: "gif_end" });
+    const why = await gifSendOne(name, bytes);
+    if (why) failed.push(`${name} (${why})`); else ok++;
   }
-  $("gifProg").textContent = "Upload complete.";
-  refreshGifList();
+  $("gifProg").textContent = failed.length
+    ? `${ok} uploaded, ${failed.length} failed: ${failed.join("; ")}`
+    : `Upload complete — ${ok} clip(s).`;
+  refreshGifList().catch(() => {});
 }
 
 async function send(obj) {
@@ -6135,6 +6200,8 @@ async function teardown() {
   $("connect").toggleAttribute("disabled", false); $("disconnect").toggleAttribute("disabled", true);
   $("load").toggleAttribute("disabled", true); $("save").toggleAttribute("disabled", true); $("form").classList.remove("on");
   $("slideUpload").toggleAttribute("disabled", true); $("slideClear").toggleAttribute("disabled", true);
+  $("gifUpload").toggleAttribute("disabled", true); $("gifClear").toggleAttribute("disabled", true);
+  $("fw").textContent = "";
   log("Disconnected.");
 }
 
@@ -6148,17 +6215,25 @@ $("connect").onclick = async () => {
       { usbVendorId: 0x303a },                        // Espressif native USB — bench, zero, C3
     ]});
     await port.open({ baudRate: 115200 });
+    // Pin the modem lines to pyserial's defaults (both asserted), the state measured safe on the
+    // CH343 ship board: DTR asserted + RTS DEasserted pulls GPIO0 (BOOT, also the button) low,
+    // which reads as a held button -> deep sleep 0.9 s after Connect. Chrome's post-open defaults
+    // happen to be safe but are undocumented; don't rely on that across browsers (Firefox 151+).
+    try { await port.setSignals({ dataTerminalReady: true, requestToSend: true }); }
+    catch (e) { console.warn("setSignals unavailable:", e); }
     reader = port.readable.getReader(); writer = port.writable.getWriter();
     readLoop();
     $("connect").toggleAttribute("disabled", true); $("disconnect").toggleAttribute("disabled", false);
     $("load").toggleAttribute("disabled", false); $("form").classList.add("on");
-    log("Connected. Loading…");
+    log("Connected. Loading… (a freshly-reset board takes ~10 s to boot)");
     // ponytail: single catalog is lost if the CDC port-open resets the device / drops the first line;
     // retry until it answers (cleared on receipt). Cap so a wrong/silent port doesn't spin forever.
+    // Budget must comfortably outlast the ~9.3 s boot splash a port-open reset costs (the device is
+    // deaf until loop() runs; the queued catalogs then all answer at once): 25 x 600 ms = 15 s.
     let tries = 0;
     send({ cmd: "catalog" });
     catalogTimer = setInterval(() => {
-      if (++tries > 12) { clearInterval(catalogTimer); catalogTimer = null; log("No response — replug the device and reconnect."); return; }
+      if (++tries > 25) { clearInterval(catalogTimer); catalogTimer = null; log("No response in 15 s — replug the device and reconnect."); return; }
       send({ cmd: "catalog" });
     }, 600);
   } catch (e) {
