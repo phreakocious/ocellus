@@ -108,6 +108,76 @@ void test_debug_set_rederives_the_sleep_latch() {
   TEST_ASSERT_EQUAL_FLOAT(100.0f, p.energy());
 }
 
+// petCmdParse is the parse half of {"cmd":"pet"}/petsim/pettap (treatcat.cpp applies the result).
+// The anchoring and malformed-line handling live here because the wrapper TU is Arduino-bound.
+
+// The pre-anchor matcher hit "pet" ANYWHERE in the line, so a config set whose name (or a gif
+// clip name, palette name...) was exactly pet/petsim/pettap was hijacked before the JSON handler
+// and that config could never save. Anchored = compact-JSON cmd key only.
+void test_petcmd_anchored_to_cmd_key() {
+  PetCmd c;
+  TEST_ASSERT_FALSE(petCmdParse("{\"cmd\":\"set\",\"config\":{\"name\":\"pet\"}}", c));
+  TEST_ASSERT_FALSE(petCmdParse("{\"cmd\":\"set\",\"config\":{\"name\":\"petsim\"}}", c));
+  TEST_ASSERT_FALSE(petCmdParse("{\"cmd\":\"set\",\"config\":{\"name\":\"pettap\"}}", c));
+  TEST_ASSERT_FALSE(petCmdParse("{\"cmd\":\"get\"}", c));
+  TEST_ASSERT_FALSE(petCmdParse("", c));
+}
+
+void test_petcmd_plain_pet_is_read_only() {
+  PetCmd c;
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"pet\"}", c));
+  TEST_ASSERT_FALSE(c.sim);
+  TEST_ASSERT_FALSE(c.tap);
+  TEST_ASSERT_FALSE(c.hasFull); TEST_ASSERT_FALSE(c.hasEn); TEST_ASSERT_FALSE(c.hasTreats);
+}
+
+void test_petcmd_pettap() {
+  PetCmd c;
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"pettap\"}", c));
+  TEST_ASSERT_TRUE(c.tap);
+  TEST_ASSERT_FALSE(c.sim);     // "cmd":"pet" must not match inside "cmd":"pettap"
+}
+
+void test_petcmd_petsim_keys_all_optional() {
+  PetCmd c;
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"petsim\",\"full\":5,\"en\":9,\"treats\":4}", c));
+  TEST_ASSERT_TRUE(c.sim); TEST_ASSERT_FALSE(c.tap);
+  TEST_ASSERT_TRUE(c.hasFull);   TEST_ASSERT_EQUAL_FLOAT(5.0f, c.full);
+  TEST_ASSERT_TRUE(c.hasEn);     TEST_ASSERT_EQUAL_FLOAT(9.0f, c.en);
+  TEST_ASSERT_TRUE(c.hasTreats); TEST_ASSERT_EQUAL_UINT32(4, c.treats);
+
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"petsim\",\"full\":30.5}", c));
+  TEST_ASSERT_TRUE(c.hasFull);   TEST_ASSERT_EQUAL_FLOAT(30.5f, c.full);
+  TEST_ASSERT_FALSE(c.hasEn); TEST_ASSERT_FALSE(c.hasTreats);
+
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"petsim\",\"en\":15}", c));
+  TEST_ASSERT_FALSE(c.hasFull);
+  TEST_ASSERT_TRUE(c.hasEn);     TEST_ASSERT_EQUAL_FLOAT(15.0f, c.en);
+
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"petsim\"}", c));    // bare petsim: reply-only, no force
+  TEST_ASSERT_TRUE(c.sim);
+  TEST_ASSERT_FALSE(c.hasFull); TEST_ASSERT_FALSE(c.hasEn); TEST_ASSERT_FALSE(c.hasTreats);
+}
+
+// The pre-extraction code did atof(strchr(pf, ':') + 1): a key with no ':' after it (hand-typed,
+// or the tail RX-dropped during the 14 ms flush) made strchr return NULL -> read from address 1
+// -> LoadProhibited panic and reboot. Every malformation here must parse as key-absent.
+void test_petcmd_missing_colon_is_key_absent_not_a_crash() {
+  PetCmd c;
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"petsim\",\"full\"}", c));
+  TEST_ASSERT_TRUE(c.sim);
+  TEST_ASSERT_FALSE(c.hasFull);
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"petsim\",\"full\"", c));    // truncated at the key
+  TEST_ASSERT_FALSE(c.hasFull);
+  // a later key's ':' must not be read as this key's value (the old strchr scanned to end of line)
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"petsim\",\"full\",\"en\":50}", c));
+  TEST_ASSERT_FALSE(c.hasFull);
+  TEST_ASSERT_TRUE(c.hasEn); TEST_ASSERT_EQUAL_FLOAT(50.0f, c.en);
+  // spaced form falls through to key-absent, same convention as the cmd anchor
+  TEST_ASSERT_TRUE(petCmdParse("{\"cmd\":\"petsim\",\"full\" : 5}", c));
+  TEST_ASSERT_FALSE(c.hasFull);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_float_decay_below_one_point_per_frame);
@@ -118,5 +188,10 @@ int main() {
   RUN_TEST(test_force_wake_beats_latch_through_next_frame);
   RUN_TEST(test_mood_priority);
   RUN_TEST(test_debug_set_rederives_the_sleep_latch);
+  RUN_TEST(test_petcmd_anchored_to_cmd_key);
+  RUN_TEST(test_petcmd_plain_pet_is_read_only);
+  RUN_TEST(test_petcmd_pettap);
+  RUN_TEST(test_petcmd_petsim_keys_all_optional);
+  RUN_TEST(test_petcmd_missing_colon_is_key_absent_not_a_crash);
   return UNITY_END();
 }

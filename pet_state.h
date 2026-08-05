@@ -70,3 +70,20 @@ private:
   uint32_t tr   = 0;
   bool     sleeping = false;   // latched
 };
+
+// One parsed pet serial line: {"cmd":"pet"} / {"cmd":"petsim",...} / {"cmd":"pettap"}. The parse
+// lives here rather than in treatcat.cpp so it is in the native suite (treatcat.cpp is
+// Arduino-bound and structurally untestable on the host); treatcat.cpp only applies the result.
+struct PetCmd {
+  bool sim = false, tap = false;                            // both false = plain {"cmd":"pet"}, read-only
+  bool hasFull = false, hasEn = false, hasTreats = false;   // petsim keys are all optional
+  float    full = 0.0f, en = 0.0f;
+  uint32_t treats = 0;
+};
+
+// Anchored to the compact-JSON cmd key ("cmd":"pet" etc.), the handleTapCmd convention: a config
+// set whose *name* is pet/petsim/pettap must fall through to the JSON handler, and a hand-typed
+// spaced variant falls through too. Returns false when the line is none of the three. A petsim
+// key with no ':' straight after it (hand-typed, or RX corruption during the 14 ms flush) reads
+// as key-absent -- never as a pointer past the end of the line.
+bool petCmdParse(const char* line, PetCmd& out);

@@ -1,4 +1,6 @@
 #include "pet_state.h"
+#include <string.h>
+#include <stdlib.h>
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -49,4 +51,28 @@ PetMood PetState::mood(bool careEnabled) const {
   if (sleeping)     return PET_SLEEPY;
   if (hungry())     return PET_NEEDY;
   return PET_CONTENT;
+}
+
+// "key":<value> in compact JSON. nullptr when the key is missing or the ':' is not immediately
+// after it, so a truncated `"full"` tail (RX drop) or a spaced `"full" : 5` reads as absent
+// instead of dereferencing strchr(NULL)+1 or stealing a later key's value.
+static const char* petVal(const char* line, const char* key) {
+  const char* p = strstr(line, key);
+  if (!p) return nullptr;
+  p += strlen(key);
+  return *p == ':' ? p + 1 : nullptr;
+}
+
+bool petCmdParse(const char* line, PetCmd& out) {
+  out = PetCmd{};
+  out.sim = strstr(line, "\"cmd\":\"petsim\"") != nullptr;
+  out.tap = strstr(line, "\"cmd\":\"pettap\"") != nullptr;
+  // the closing quote keeps "pet" from matching inside petsim/pettap, so order is free
+  if (!out.sim && !out.tap && strstr(line, "\"cmd\":\"pet\"") == nullptr) return false;
+  if (out.sim) {
+    if (const char* v = petVal(line, "\"full\""))   { out.full   = (float)atof(v);     out.hasFull   = true; }
+    if (const char* v = petVal(line, "\"en\""))     { out.en     = (float)atof(v);     out.hasEn     = true; }
+    if (const char* v = petVal(line, "\"treats\"")) { out.treats = (uint32_t)atoi(v);  out.hasTreats = true; }
+  }
+  return true;
 }

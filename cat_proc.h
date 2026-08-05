@@ -88,26 +88,29 @@ struct CatDiagnostics {
 };
 
 // rasterizer context threaded through every fill
+// Every member carries a default so `CatRaster r;` is fully deterministic: a construction site
+// that forgets one flag must get false, not stack garbage read as bool (UBSan caught exactly
+// that -- the test harness's fresh() omitted remapLight and the remap branch went light at random).
 struct CatRaster {
-  uint8_t (*g)[CAT_GW];
-  CatDiagnostics* d;   // nullable
-  uint8_t part;        // CATP_* for diag attribution
-  uint8_t clipTo;      // nonzero: write only where the grid already holds this index
-  int     clipCx, clipCy, clipR;  // nonzero R: write only inside this disc. Geometric, not
-                        // index-based -- the head and the body are both fur, so a marking that
-                        // must stop at the skull cannot be clipped by what is under the brush.
-  bool    remap;       // marking mode: fur band k -> accent band k, else skip
-  bool    remapLight;  // with remap: lift toward the fur ramp's bright end instead (the blaze)
-  bool    far;         // depth cue: shift one band darker (used by the rear-leg plane)
-  bool    contact;     // draw a contact halo under this part before drawing it
-  bool    darken;      // halo pass: step EXISTING fur/accent one band darker, paint nothing new
-  bool    furOnly;     // paint only over fur/accent — keeps a flat colour off eyes and background
-  bool    rim;         // under-draw pass: shEllipse/shCapsule paint the grown CI_OUTLINE silhouette
-                        // instead of their normal shaded fill (spec §Sticker pass, under-draw)
-  bool    mirror;      // exact scene-facing flip. catPlot reflects x at the single write gate,
-                        // after shading/features are resolved, so every palette index travels
-                        // with the drawing and the mirrored frame stays artistically identical.
-  const uint8_t* ramp; // non-null: shade per cell from the primitive's own normal into this ramp
+  uint8_t (*g)[CAT_GW] = nullptr;
+  CatDiagnostics* d = nullptr;   // nullable
+  uint8_t part = 0;         // CATP_* for diag attribution
+  uint8_t clipTo = 0;       // nonzero: write only where the grid already holds this index
+  int     clipCx = 0, clipCy = 0, clipR = 0;  // nonzero R: write only inside this disc. Geometric, not
+                            // index-based -- the head and the body are both fur, so a marking that
+                            // must stop at the skull cannot be clipped by what is under the brush.
+  bool    remap = false;    // marking mode: fur band k -> accent band k, else skip
+  bool    remapLight = false;  // with remap: lift toward the fur ramp's bright end instead (the blaze)
+  bool    far = false;      // depth cue: shift one band darker (used by the rear-leg plane)
+  bool    contact = false;  // draw a contact halo under this part before drawing it
+  bool    darken = false;   // halo pass: step EXISTING fur/accent one band darker, paint nothing new
+  bool    furOnly = false;  // paint only over fur/accent — keeps a flat colour off eyes and background
+  bool    rim = false;      // under-draw pass: shEllipse/shCapsule paint the grown CI_OUTLINE silhouette
+                            // instead of their normal shaded fill (spec §Sticker pass, under-draw)
+  bool    mirror = false;   // exact scene-facing flip. catPlot reflects x at the single write gate,
+                            // after shading/features are resolved, so every palette index travels
+                            // with the drawing and the mirrored frame stays artistically identical.
+  const uint8_t* ramp = nullptr; // non-null: shade per cell from the primitive's own normal into this ramp
 };
 
 // ---- lighting -------------------------------------------------------------

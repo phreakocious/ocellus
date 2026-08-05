@@ -183,6 +183,8 @@ static void blitCatGrid(int dx, int dy, const CatPreset& p) {
 // once-play reaction that overrides the base (CA_COUNT = none). Set by feed/pet/quirk.
 static CatAnim  catReact = CA_COUNT;
 static uint32_t catReactStart = 0;
+static uint32_t lastReactStart = 0;   // catReactStart value the pose-set consumed; equal means
+                                      // the pending reaction has actually started on screen
 // Gesture scheduling (mood edges, idle fidget + beg clocks, the mood pools) lives in
 // cat_choreo.h so it is natively tested; this file only starts what it returns.
 static CatChoreo choreo;
@@ -199,7 +201,11 @@ static void selectAndDrawCat(PetMood m, uint32_t now, int dy) {
   const CatPreset& p = CAT_PRESET[variant];
   CatAnim base = (m == PET_SLEEPY) ? CA_SLEEPING : (m == PET_NEEDY) ? CA_MEOW : CA_IDLE;
 
-  if (catReact != CA_COUNT && catPoseDone(gCatRS)) {                      // once-play finished
+  // Once-play finished. The seq gate matters: catPoseDone reads the pose ON SCREEN, and a tap
+  // landing in the frame(s) between an old ONCE hitting phase 1.0 and this clear latches a FRESH
+  // catReact that has not started yet -- without the gate the old pose's done flag swallowed it
+  // (hearts and hop fired, the gesture never played) and onGestureEnd rolled chains for it.
+  if (catReact != CA_COUNT && catReactStart == lastReactStart && catPoseDone(gCatRS)) {
     choreo.onGestureEnd(catReact, now, catRnd);   // a wash or itch may schedule its bout follow-up
     catReact = CA_COUNT;
   }
@@ -219,7 +225,6 @@ static void selectAndDrawCat(PetMood m, uint32_t now, int dy) {
   // Restart on a NEW trigger too, not just a changed pose: the tap handlers re-arm catReact
   // with a fresh catReactStart, and tapping twice mid-stretch must replay it. (The baked path
   // got this free from its frame index; catSetPose is edge-triggered, so it needs the seq.)
-  static uint32_t lastReactStart = 0;
   CatAnim show = (catReact != CA_COUNT) ? catReact : base;
   if (show != gCatRS.cur || catReactStart != lastReactStart) {
     catSetPose(gCatRS, p, show);                         // blends from the on-screen pose
@@ -345,20 +350,17 @@ void treatcatOnEnter() { gTreatTap = 0; fortuneMode = false; revealDoneAt = 0;
   gCatRS.mirror = random(0, 2) != 0;   // scene facing, decided once per visit; exact image flip
   choreo.enterScene(); }
 
-// {"cmd":"pet"} / {"cmd":"petsim","full":N,"en":N}. Substring-matched the same way "bat"/"batsim"
-// are: the quoted "pet" cannot match inside "petsim", so order does not matter here.
+// {"cmd":"pet"} / {"cmd":"petsim","full":N,"en":N,"treats":N} / {"cmd":"pettap"}. The parse is
+// petCmdParse (pet_state.cpp, natively tested): anchored to the compact-JSON cmd key like
+// main.cpp's handleTapCmd, so a config set whose *name* is pet/petsim/pettap reaches the JSON
+// handler instead of being hijacked here. This wrapper only applies the result to live scene state.
 bool treatcatPetCmd(const char* line, char* out, unsigned outLen) {
-  bool sim = strstr(line, "\"petsim\"") != nullptr;
-  bool tap = strstr(line, "\"pettap\"") != nullptr;
-  if (!sim && !tap && strstr(line, "\"pet\"") == nullptr) return false;
-  if (sim) {
-    const char* pf = strstr(line, "\"full\"");
-    const char* pe = strstr(line, "\"en\"");
-    const char* pt = strstr(line, "\"treats\"");
-    float f = pf ? (float)atof(strchr(pf, ':') + 1) : pet.fullness();
-    float e = pe ? (float)atof(strchr(pe, ':') + 1) : pet.energy();
-    pet.debugSet(f, e);
-    if (pt) pet.debugSetTreats((uint32_t)atoi(strchr(pt, ':') + 1));
+  PetCmd cmd;
+  if (!petCmdParse(line, cmd)) return false;
+  if (cmd.sim) {
+    pet.debugSet(cmd.hasFull ? cmd.full : pet.fullness(),
+                 cmd.hasEn   ? cmd.en   : pet.energy());
+    if (cmd.hasTreats) pet.debugSetTreats(cmd.treats);
     catReact = CA_COUNT;            // drop any once-play reaction so the new mood shows immediately
   }
   // {"cmd":"pettap"} injects a tap at the cat's centre through the SAME mailbox the touch ISR
@@ -367,7 +369,7 @@ bool treatcatPetCmd(const char* line, char* out, unsigned outLen) {
   //
   // The mailbox carries SCREEN coordinates (touchPoll() normalizes at read, see touch.cpp), same
   // as catRX/catRY, so no rotation compensation belongs here anymore (2026-08-01).
-  if (strstr(line, "\"pettap\"") != nullptr) {
+  if (cmd.tap) {
     int tx = catRX + catRW / 2, ty = catRY + catRH / 2;
     gTreatTap = 0x80000000u | ((uint32_t)tx << 12) | (uint32_t)ty;
   }
