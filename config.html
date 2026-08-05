@@ -5995,8 +5995,13 @@ async function imgToRgb565(file) {
 let slideResolve = null;
 function slideRpc(obj) {
   return new Promise((res, rej) => {
-    slideResolve = res; send(obj);
-    setTimeout(() => { if (slideResolve) { slideResolve = null; rej(new Error("slide timeout")); } }, 5000);
+    // The timer must only clear ITS OWN rpc (identity check): a bare `if (slideResolve)` let the
+    // stale timer of an already-resolved chunk fire 5s later DURING a following chunk, null that
+    // chunk's resolver, and leave its await settled by nothing -- ack dropped by the reader, own
+    // timer a no-op. Measured as an upload frozen mid-slide with no error (2026-08-04, 27%).
+    const mine = res;
+    slideResolve = mine; send(obj);
+    setTimeout(() => { if (slideResolve === mine) { slideResolve = null; rej(new Error("slide timeout")); } }, 5000);
   });
 }
 async function refreshSlideList() {
@@ -6070,8 +6075,9 @@ const GIF_NAME_MAX = 24, GIF_MAX_BYTES = 2 * 1024 * 1024;
 let gifResolve = null;
 function gifRpc(obj) {
   return new Promise((res, rej) => {
-    gifResolve = res; send(obj);
-    setTimeout(() => { if (gifResolve) { gifResolve = null; rej(new Error("gif timeout")); } }, 5000);
+    const mine = res;    // identity check -- same stale-timer clobber as slideRpc, see there
+    gifResolve = mine; send(obj);
+    setTimeout(() => { if (gifResolve === mine) { gifResolve = null; rej(new Error("gif timeout")); } }, 5000);
   });
 }
 // Must match gifNameOk() in slide_proto.cpp -- the device rejects anything else, and a filename
@@ -6152,8 +6158,9 @@ async function send(obj) {
 // palettes (~360B) are the one piece that may still drop (Phase-3-pending limit).
 function setPart(part) {
   return new Promise((res) => {
-    setResolve = res; send({ cmd: "set", config: part });
-    setTimeout(() => { if (setResolve) { setResolve = null; res({ type: "timeout" }); } }, 2000);
+    const mine = res;    // identity check -- same stale-timer clobber as slideRpc, see there
+    setResolve = mine; send({ cmd: "set", config: part });
+    setTimeout(() => { if (setResolve === mine) { setResolve = null; res({ type: "timeout" }); } }, 2000);
   });
 }
 async function saveConfig(cfg) {
