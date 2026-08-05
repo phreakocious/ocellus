@@ -203,7 +203,8 @@ void pollConfigSerial() {
         g_rxbuf.clear(); continue;
       }
       if (g_rxbuf.find("\"bat\"") != std::string::npos) {   // {"cmd":"bat"} -> battery millivolts
-        Serial.printf("{\"type\":\"bat\",\"mv\":%d,\"usb\":%s,\"chg\":%s}\n", readBatteryMv(),
+        Serial.printf("{\"type\":\"bat\",\"mv\":%d,\"ema\":%d,\"prev\":%d,\"usb\":%s,\"chg\":%s}\n",
+                      readBatteryMv(), gBatt.emaMv(), gBatt.prevSampleMv(),
                       gBatt.usbPowered() ? "true" : "false", gBatt.charging() ? "true" : "false");
         g_rxbuf.clear(); continue;
       }

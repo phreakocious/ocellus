@@ -21,6 +21,11 @@ constexpr int      BATT_CHG_STEP_MV      = 40;     // plug/unplug I*R step betwe
                                                    // per-unit ADC offset cancels, unlike the absolute latch above)
 constexpr int      BATT_CHG_HOLD_MV      = 5;      // EMA must climb this much per hold window or the chg flag self-heals off
 constexpr uint32_t BATT_CHG_HOLD_MS      = 60000;
+constexpr int      BATT_RISE_MV          = 10;     // EMA climbing this much per window, TWICE running = charging. Catches
+constexpr int      BATT_RISE_WINDOWS     = 2;      // the case no step can (boot/reset while already plugged in: the step
+                                                   // history is gone). Measured at low SoC: charge climbs ~34mV/min vs
+                                                   // +/-6mV sample noise. Two windows is what separates it from cell
+                                                   // relaxation after a heavy mode, which climbs once then flattens.
 constexpr int      BATT_SAG_MV           = 15;     // EMA falling this much per window while usb-latched = unplugged: a
                                                    // charger holds the cell FLAT (measured +/-9mV raw noise), so a
                                                    // sustained sag can only mean VBUS is gone -- catches the unit whose
@@ -33,6 +38,10 @@ struct BatteryMonitor {
   bool usbPowered() const { return usb || chg; }   // USB present: absolute latch OR the charge-step detector (see feed)
   bool charging() const { return chg; }      // which half of usbPowered fired (debug screen / bat reply)
   int  emaMv() const { return ema; }         // what the USB latch + LOW threshold actually decide on (debug screen)
+  int  prevSampleMv() const { return prevMv; }   // last RAW sample the STEP rules compared against. The `bat`
+                                                 // reply's own mv is a fresh ADC read taken at reply time, so it
+                                                 // is NOT what the detector saw -- these two fields are the only
+                                                 // way to read a step decision from outside (field calibration).
  private:
   BattState st = BATT_NORMAL;
   int      ema = 0;                      // 0 = unseeded (readBatteryMv already averages 8 ADC reads)
@@ -43,5 +52,8 @@ struct BatteryMonitor {
   int      prevMv = 0;                   // last RAW sample (0 = none yet), for the step delta
   int      slopeMv = 0;                  // EMA at the start of the current hold window
   uint32_t slopeMs = 0;
+  bool     slopeArmed = false;           // separate from slopeMs: a first sample at millis()==0 would
+                                         // otherwise leave slopeMs falsy and re-anchor forever
+  uint8_t  riseRun = 0;                  // consecutive windows the EMA climbed >= BATT_RISE_MV
   uint32_t lastSplashMs = 0;
 };

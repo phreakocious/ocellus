@@ -198,6 +198,56 @@ void test_usb_latch_survives_flat_float() {
   TEST_ASSERT_TRUE(b.usbPowered());                    // 5 min on the desk: no false unplug
 }
 
+void test_rise_detects_charging_with_no_step_history() {
+  // The measured field case: a unit flashed/booted while already on the cable reads usb:false at
+  // 3926mV and no step is ever seen. Two windows of real charge climb (~34mV/min measured) set chg.
+  BatteryMonitor b;
+  uint32_t t = 0;
+  int mv = 3900;
+  b.feed(mv, t); t += 5000;
+  TEST_ASSERT_FALSE(b.usbPowered());                 // boot: blind, as observed
+  for (int i = 0; i < 36; i++, t += 5000) { mv += 3; b.feed(mv, t); }   // ~36mV/min; needs 2 closed windows
+  TEST_ASSERT_TRUE(b.usbPowered());
+  TEST_ASSERT_TRUE(b.charging());
+}
+
+void test_rise_ignores_one_window_of_relaxation() {
+  // Cell relaxation after leaving a heavy mode: climbs once, then flat. Must NOT read as charging.
+  BatteryMonitor b;
+  uint32_t t = 0;
+  int mv = 3700;
+  b.feed(mv, t); t += 5000;
+  for (int i = 0; i < 12; i++, t += 5000) { mv += 3; b.feed(mv, t); }   // one window of climb
+  for (int i = 0; i < 36; i++, t += 5000) b.feed(mv, t);                // then flat for 3 min
+  TEST_ASSERT_FALSE(b.usbPowered());
+}
+
+void test_rise_ignores_discharge() {
+  BatteryMonitor b;
+  uint32_t t = 0;
+  int mv = 3900;
+  for (int i = 0; i < 60; i++, t += 5000) { mv -= 2; b.feed(mv, t); }   // steady discharge, 5 min
+  TEST_ASSERT_FALSE(b.usbPowered());
+}
+
+void test_chg_survives_the_window_after_a_deep_unplug_sag() {
+  // Field trace 2026-08-04 (puck 5B5F027308): unplugged at low SoC the cell sagged 3956->3565; the
+  // replug step set chg, then the very next hold window compared the recovering EMA against its
+  // PRE-UNPLUG anchor, read a net fall, and cleared chg ~6 SECONDS after it fired. A step must
+  // re-anchor the slope window -- the old regime's voltage says nothing about the new one.
+  BatteryMonitor b;
+  uint32_t t = 0;
+  for (int i = 0; i < 12; i++, t += 5000) b.feed(3956, t);          // on the charger, flat
+  for (int i = 0; i < 10; i++, t += 5000) b.feed(3565, t);          // unplugged: deep sag
+  b.feed(3860, t); t += 5000;                                        // replug: ~+295 step
+  TEST_ASSERT_TRUE(b.charging());
+  // Only far enough to cross the ONE window boundary that the stale anchor poisons. Running longer
+  // would let the sustained-rise rule set chg again ~2 min later and hide the regression entirely
+  // (this test passed for exactly that reason before the assertion was tightened).
+  for (int i = 0; i < 5; i++, t += 5000) b.feed(3863 + i * 3, t);    // keeps charging
+  TEST_ASSERT_TRUE(b.charging());                                    // must not have been cleared
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_no_cell_is_inert);
@@ -219,5 +269,9 @@ int main() {
   RUN_TEST(test_usb_unplug_step_clears_latch);
   RUN_TEST(test_usb_soft_unplug_sag_clears_latch_inside_band);
   RUN_TEST(test_usb_latch_survives_flat_float);
+  RUN_TEST(test_rise_detects_charging_with_no_step_history);
+  RUN_TEST(test_rise_ignores_one_window_of_relaxation);
+  RUN_TEST(test_rise_ignores_discharge);
+  RUN_TEST(test_chg_survives_the_window_after_a_deep_unplug_sag);
   return UNITY_END();
 }

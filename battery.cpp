@@ -3,7 +3,7 @@
 void BatteryMonitor::feed(int mv, uint32_t nowMs) {
   if (mv < BATT_NO_CELL_MV) {            // no cell (USB-powered bench board): reset to inert
     st = BATT_NORMAL; ema = 0; cutRun = 0; entryPulse = false; usb = false;
-    chg = false; prevMv = 0; slopeMs = 0;   // a floating divider jumps hundreds of mV; keep the step detector inert too
+    chg = false; prevMv = 0; slopeMs = 0; slopeArmed = false; riseRun = 0;   // a floating divider jumps hundreds of mV; keep the step detector inert too
     return;
   }
   ema = ema ? (ema * 3 + mv) / 4 : mv;
@@ -28,9 +28,15 @@ void BatteryMonitor::feed(int mv, uint32_t nowMs) {
   // here; the UART-wake host window covers configuring in that state). Held only while the EMA
   // keeps climbing, so a false step self-heals off within ~2 windows; the absolute latch takes over
   // at the top and resets the detector for the next plug cycle.
+  // A step means the POWER REGIME changed, so the slope anchor from the old regime is meaningless
+  // -- re-anchor on both edges. Without this the window after a plug-in compares the recovering EMA
+  // against its PRE-UNPLUG value; at low SoC the sag is ~390mV, so that reads as "not climbing" and
+  // cleared chg ~6s after the step set it (measured 2026-08-04, and invisible until the bat reply
+  // exposed ema/prev).
+  bool stepped = false;
   if (prevMv) {
-    if (!usb && !chg && mv - prevMv >= BATT_CHG_STEP_MV) chg = true;
-    else if ((chg || usb) && prevMv - mv >= BATT_CHG_STEP_MV) { chg = false; usb = false; }   // unplug step:
+    if (!usb && !chg && mv - prevMv >= BATT_CHG_STEP_MV) { chg = true; stepped = true; }
+    else if ((chg || usb) && prevMv - mv >= BATT_CHG_STEP_MV) { chg = false; usb = false; stepped = true; }   // unplug step:
     // a charger never drops the terminal 40mV in one sample; clearing the LATCH here too frees the
     // unit whose off-USB resting voltage never falls below BATT_USB_OFF_MV (the stuck-"usb yes"
     // battery drain). A false clear on real USB self-heals: the next sample's EMA is still >= ON.
@@ -39,11 +45,20 @@ void BatteryMonitor::feed(int mv, uint32_t nowMs) {
   // self-heals), and a usb latch must not be SAGGING (float is flat; sustained sag = unplugged --
   // this is the path that catches a soft unplug from full float, where the taper current is too
   // small to make a 40mV step).
-  if (!slopeMs) { slopeMv = ema; slopeMs = nowMs; }
+  if (!slopeArmed || stepped) { slopeMv = ema; slopeMs = nowMs; slopeArmed = true; riseRun = 0; }
   else if (nowMs - slopeMs >= BATT_CHG_HOLD_MS) {
     int d = ema - slopeMv;
     if (chg && d < BATT_CHG_HOLD_MV) chg = false;
     if (usb && d <= -BATT_SAG_MV) usb = false;
+    // Sustained-rise detect: the ONLY signal available when no step was ever seen -- a unit that
+    // booted (or was flashed/reset) already on the cable has no step history, and at low charge
+    // the latch is 400mV away, so both other layers are blind. Measured 2026-08-04 on a 3.9V cell:
+    // charging climbs ~34mV/min, sample noise +/-6mV. A discharging cell never climbs; relaxation
+    // after a heavy mode climbs ONE window then flattens, which is what the run counter rejects.
+    if (!usb && !chg) {
+      if (d >= BATT_RISE_MV) { if (++riseRun >= BATT_RISE_WINDOWS) chg = true; }
+      else riseRun = 0;
+    } else riseRun = 0;
     slopeMv = ema; slopeMs = nowMs;
   }
   if (usb) chg = false;
