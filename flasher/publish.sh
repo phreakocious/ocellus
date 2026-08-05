@@ -29,15 +29,17 @@ REMOTE="nullphase.net:nullphase/oc/flash/"
   0xe000  "$BOOT0" \
   0x10000 "$BUILD/firmware.bin"
 
-# Stamp the flasher version from git so the esp-web-tools dialog shows something
-# real and traceable (build date + commit) instead of a hand-edited "1.0" that
-# always lies. Repo manifest.json stays "dev"; only the deployed copy is stamped.
+# Stamp the flasher version with the same `git describe --tags --always --dirty` that
+# tools/version_stamp.py bakes into the firmware (catalog `fw` / debug screen), so the
+# esp-web-tools dialog and the device it just flashed always agree on identity. Repo
+# manifest.json stays "dev"; only the deployed copy is stamped.
 # -dirty flags a build made from uncommitted changes (won't reproduce from git).
-VER="$(date +%Y.%m.%d)-$(git -C .. rev-parse --short HEAD)$(git -C .. diff --quiet HEAD 2>/dev/null || echo -dirty)"
+VER="$(git -C .. describe --tags --always --dirty)"
 MANIFEST="$(mktemp)"; trap 'rm -f "$MANIFEST"' EXIT
 sed "s/\"version\": *\"[^\"]*\"/\"version\": \"$VER\"/" manifest.json > "$MANIFEST"
 
 scp index.html jelly.js ocellus.bin "$REMOTE"
+scp -r esp-web-tools "$REMOTE"    # vendored esp-web-tools chunks (see index.html); content-hashed, so a merge is safe
 scp "$MANIFEST" "${REMOTE}manifest.json"                          # stamped, not the repo template
 scp ../config.html "nullphase.net:nullphase/oc/index.html"        # config page = /oc/'s index
 echo "Published $VER -> https://nullphase.net/oc/flash/ (+ config page at /oc/)"

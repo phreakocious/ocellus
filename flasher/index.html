@@ -4,7 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flash ocellus</title>
-<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+<!-- esp-web-tools 10.4.0 (dist/web), vendored like jelly.js: a CDN outage or bad 10.x
+     publish must not break the Install button. The chunks are content-hashed and import
+     each other by relative path -- upgrade by re-vendoring the whole dist/web directory. -->
+<script type="module" src="./esp-web-tools/install-button.js"></script>
 <script type="module" src="./jelly.js"></script>
 <script>setTimeout(() => document.documentElement.classList.add('nojelly'), 2000);</script>
 <style>
