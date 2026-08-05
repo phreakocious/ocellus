@@ -195,14 +195,19 @@ void pollConfigSerial() {
   while (Serial.available()) {
     char ch = Serial.read();
     if (ch == '\n') {
-      if (g_rxbuf.find("\"eyeevent\"") != std::string::npos) {   // {"cmd":"eyeevent","ev":"wander|drift|microsleep"} -- bench trigger (eye modes only)
+      // These matchers stay substring-not-full-parse on purpose (a corrupted line still answers --
+      // RX drops hit during the flush), but anchored to the compact-JSON cmd key like handleTapCmd:
+      // a bare value match ("\"bat\"") hijacked any config set whose name VALUE was "bat" before
+      // the JSON handler could see it. Hand-typed spaced JSON falls through to handleLine, same
+      // documented tradeoff as tap.
+      if (g_rxbuf.find("\"cmd\":\"eyeevent\"") != std::string::npos) {   // {"cmd":"eyeevent","ev":"wander|drift|microsleep"} -- bench trigger (eye modes only)
         int which = g_rxbuf.find("drift") != std::string::npos ? 1
                   : g_rxbuf.find("micro") != std::string::npos ? 2 : 0;
         triggerRareEvent(which);
         Serial.printf("{\"type\":\"eyeevent\",\"ev\":%d}\n", which);
         g_rxbuf.clear(); continue;
       }
-      if (g_rxbuf.find("\"bat\"") != std::string::npos) {   // {"cmd":"bat"} -> battery millivolts
+      if (g_rxbuf.find("\"cmd\":\"bat\"") != std::string::npos) {   // {"cmd":"bat"} -> battery millivolts; closing quote keeps it from matching inside "cmd":"batsim"
         Serial.printf("{\"type\":\"bat\",\"mv\":%d,\"ema\":%d,\"prev\":%d,\"usb\":%s,\"chg\":%s}\n",
                       readBatteryMv(), gBatt.emaMv(), gBatt.prevSampleMv(),
                       gBatt.usbPowered() ? "true" : "false", gBatt.charging() ? "true" : "false");
@@ -214,13 +219,13 @@ void pollConfigSerial() {
           Serial.println(petOut); g_rxbuf.clear(); continue;
         }
       }
-      if (g_rxbuf.find("\"batsim\"") != std::string::npos) {   // {"cmd":"batsim","mv":3400} -> feed a fake mV (0 = real ADC)
+      if (g_rxbuf.find("\"cmd\":\"batsim\"") != std::string::npos) {   // {"cmd":"batsim","mv":3400} -> feed a fake mV (0 = real ADC)
         size_t p = g_rxbuf.find("\"mv\"");
         gBatSimMv = (p != std::string::npos) ? atoi(g_rxbuf.c_str() + g_rxbuf.find(':', p) + 1) : 0;
         Serial.printf("{\"type\":\"batsim\",\"mv\":%d}\n", gBatSimMv);
         g_rxbuf.clear(); continue;
       }
-      if (g_rxbuf.find("\"cpumhz\"") != std::string::npos) {   // {"cmd":"cpumhz","mhz":160} -> live clock A/B against the current meter; not persisted, boots at 240
+      if (g_rxbuf.find("\"cmd\":\"cpumhz\"") != std::string::npos) {   // {"cmd":"cpumhz","mhz":160} -> live clock A/B against the current meter; not persisted, boots at 240
         size_t p = g_rxbuf.find("\"mhz\"");
         int mhz = (p != std::string::npos) ? atoi(g_rxbuf.c_str() + g_rxbuf.find(':', p) + 1) : 0;
         if (mhz == 80 || mhz == 160 || mhz == 240) setCpuFrequencyMhz(mhz);   // >=80 keeps APB at 80MHz, so UART baud / SPI / LEDC timing are untouched
@@ -254,9 +259,8 @@ void pollConfigSerial() {
       // window opens for the retry too -- which is the attempt the hold exists to protect.
       if (g_rxbuf.find("\"set\"") != std::string::npos) { gCfgSetMs = millis(); gQrDirty = true; }   // any set may have replaced qrBits
       bool changed = false; int animSel = -1;
-      std::string resp = handleLine(g_rxbuf, gConfig, changed, &animSel);
-      if (changed) saveConfig(gConfig);
-      if (changed) applyConfig();
+      std::string resp = handleLine(g_rxbuf, gConfig, changed, &animSel, saveConfig);
+      if (changed) applyConfig();   // persist happens inside handleLine so a failed NVS write answers err, not a clean echo
       if (animSel >= 0) g_pendingAnim = animSel;   // applied in loop() where currentAnimId/onAnimEnter are in scope
       Serial.println(resp.c_str());
       g_rxbuf.clear();
@@ -888,12 +892,15 @@ static int moodPupilAim(int heldTarget) {
   return aim;
 }
 
+// Only modes that read gyro pay for it. Shared with setup()'s post-imuBegin re-apply -- keep one truth.
+static bool animWantsGyro(uint8_t id) { return id == YINYANG_ID || id == FLUID_ID || id == DEBUG_ID; }
+
 // Re-init per-animation state when an animation becomes active.
 void onAnimEnter(uint8_t id) {
   clipHoldClear();   // a hold must never outlive its mode (esp. the global auto-cycle gate)
   gQrDirty = true;   // any mode entry invalidates the QR flush skip (the FB holds the prior mode's pixels)
   ensureRadio(isAudioMode(id));
-  imuGyroEnable(id == YINYANG_ID || id == FLUID_ID || id == DEBUG_ID);   // only modes that read gyro pay for it
+  imuGyroEnable(animWantsGyro(id));
 #if OCELLUS_AUDIO
   if (isAudioMode(id)) {                          // reset the duty-cycle timers to entry time so the
     uint32_t t = millis();                        // first listen window runs a full LISTEN_MS
@@ -999,11 +1006,13 @@ static void encoderPoll() {
   // keeps polling every 10ms. Re-deriving from stale currentAnimId across that window would overwrite
   // g_pendingAnim with the same next-step value each poll and swallow every detent but the last.
   uint8_t base = animBase();
-  // On a debug screen the knob pages the debug screens instead of stepping favorites -- the text
-  // telemetry and the waterfall are what you want to flip between while looking at either. A click
-  // still escapes back into the favorites rotation (nextFavorite is % ANIM_COUNT).
-  g_pendingAnim = (base >= DEBUG_ID) ? stepDebug(base, delta)
-                                     : stepFavorite(gConfig.favoritesMask, base, delta);
+  // Inside the debug block (42..44) the knob pages the debug screens instead of stepping favorites --
+  // the text telemetry and the waterfall are what you want to flip between while looking at either.
+  // Must be a range check, not a floor: effects continue ABOVE the block (45+), and `>= DEBUG_ID`
+  // trapped the knob paging debug from any of them. A click still escapes back into the favorites
+  // rotation.
+  g_pendingAnim = (base >= DEBUG_ID && base <= WATERFALL_ID) ? stepDebug(base, delta)
+                                                             : stepFavorite(gConfig.favoritesMask, base, delta);
   lastInteractionTime = millis();
 }
 #else
@@ -1174,8 +1183,10 @@ void multiClick() {
   lastInteractionTime = millis();
   uint8_t base = animBase();
   int clicks = button.getNumberClicks();
-  if (clicks == 3) {  // debug screens: outside ANIM_COUNT, so nothing else can reach them.
-    // Any later click escapes on its own -- nextFavorite is % ANIM_COUNT, so debug -> 1.
+  if (clicks == 3) {  // debug screens: ids 42..44 are interior non-playable holes -- excluded from
+    // PLAYABLE_MASK, so the button cycle/favorites/carousel never land on them; only this gesture
+    // (and the encoder / --anim) reaches them. Any later click escapes on its own -- nextFavorite
+    // skips the holes and lands on the next masked favorite.
     // Triple again pages to the next debug screen (sensor -> audio -> waterfall -> wrap); on the
     // console the encoder does the same paging, which is the gesture you actually want there.
     g_pendingAnim = stepDebug(base, 1);
@@ -1802,6 +1813,9 @@ void setup() {
   gSbHueSlew.ratePerS = SB_HUE_SLEW_PER_S;   // SB wheel chases the console's real hue (see audio.h)
 #endif
   imuBegin();   // QMI8658 accel for auto-flip (Waveshare board); no-op / imuPresent=false elsewhere
+  // onAnimEnter above ran before the IMU was up, so its imuGyroEnable no-opped (imuPresent still
+  // false) and imuBegin() came up accel-only -- re-apply the boot mode's gyro decision.
+  imuGyroEnable(animWantsGyro(currentAnimId));
   touchBegin();  // CST816S gestures (Waveshare board); no-op / touchPresent=false elsewhere
   encoderBegin();  // EC11 quadrature ISRs (S3-Zero); no-op elsewhere
 
@@ -5003,7 +5017,9 @@ void loop() {
       // The splash repaints everything, so the saved band is stale -- drop the strip rather
       // than paint 40 rows of stale pixels back over the splash.
       if (gCarouselOpen) { carouselBandFree(); gCarouselOpen = false; }
-      batterySplash(); gSlidesDirty = true; gQrDirty = true;
+      // gGifsDirty too: GIF disposal frames composite over the prior frame, so a mid-clip splash
+      // otherwise leaves them painting over black until the clip loops (dirty closes/reopens it).
+      batterySplash(); gSlidesDirty = true; gQrDirty = true; gGifsDirty = true;
     }
   }
 
@@ -5210,7 +5226,7 @@ void loop() {
 #if OCELLUS_AUDIO
   else if (id == AUDIO_DEBUG_ID)          renderAudioDebug(now);    // id 43: dev ESP-NOW/audio telemetry
   else if (id == WATERFALL_ID)            renderWaterfall(now);   // id 44: 64-bin spectrogram waterfall
-  else if (id >= AUDIO_BASE) switch (id - AUDIO_BASE) {   // audio modes, 0-based; reserved holes 35..37 fall through to black
+  else if (id >= AUDIO_BASE) switch (id - AUDIO_BASE) {   // audio modes, 0-based; only 38..41 land here (35..37 are effects now, renderEffect above)
     case 0:  renderBloom(now);          break;      // id 38
     case 1:  renderRadialSpectrum(now); break;      // id 39
     case 3:  renderEcho(now);           break;      // id 41
