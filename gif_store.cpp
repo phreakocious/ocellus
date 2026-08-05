@@ -42,13 +42,15 @@ int LittleFsGifStore::list(GifMeta* out, int max) {
     if (len <= 4 || strcmp(fn + len - 4, ".gif") != 0) { f.close(); continue; }
     size_t stem = len - 4;
     if (stem > GIF_NAME_MAX) { f.close(); continue; }   // not ours; can't be addressed by name
+    char nm[GIF_NAME_MAX + 1];                   // copy BEFORE close(): f.name() points into the
+    memcpy(nm, fn, stem); nm[stem] = '\0';       // handle's path, which close() frees
     uint32_t bytes = (uint32_t)f.size();
     f.close();
     if (!out) { if (n < max) n++; continue; }
     if (n >= max) continue;
     int at = n;                                  // insertion sort: n is tiny (<= GIF_MAX)
-    while (at > 0 && strncmp(fn, out[at - 1].name, GIF_NAME_MAX) < 0) { out[at] = out[at - 1]; at--; }
-    memcpy(out[at].name, fn, stem); out[at].name[stem] = '\0';
+    while (at > 0 && strncmp(nm, out[at - 1].name, GIF_NAME_MAX) < 0) { out[at] = out[at - 1]; at--; }
+    memcpy(out[at].name, nm, stem + 1);
     out[at].bytes = bytes;
     n++;
   }
